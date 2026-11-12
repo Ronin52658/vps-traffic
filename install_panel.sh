@@ -34,7 +34,8 @@ if [ "$UNINSTALL" = 1 ]; then
   systemctl disable --now vps-traffic-panel 2>/dev/null || true
   rm -f "$SVC"; systemctl daemon-reload
   rm -rf "$DIR"
-  echo "已卸载，数据库保留在 $DATA（不需要的话 rm -rf $DATA，并 userdel $USR）"
+  echo "已卸载，数据库保留在 $DATA，敏感设置保留在 /etc/vps-traffic-panel.env"
+  echo "（不需要的话 rm -rf $DATA /etc/vps-traffic-panel.env，并 userdel $USR）"
   exit 0
 fi
 
@@ -61,7 +62,7 @@ PROXIES=${PROXIES:-127.0.0.1,::1,172.16.0.0/12}
 LISTEN=${LISTEN:-0.0.0.0}
 
 # 面板域名：强制 HTTPS 后必须有。升级时沿用原来的；示例值不算
-DOMAIN=${DOMAIN#https://}; DOMAIN=${DOMAIN#http://}; DOMAIN=${DOMAIN%%/*}
+DOMAIN=${DOMAIN#https://}; DOMAIN=${DOMAIN#http://}; DOMAIN=${DOMAIN%%/*}; DOMAIN=${DOMAIN%:443}
 if [ -n "$DOMAIN" ]; then
   PUBLIC_URL="https://$DOMAIN"
 elif [ -n "$OLD_URL" ] && [ "$OLD_URL" != "https://traffic.example.com" ] && [ "${OLD_URL#https://}" != "$OLD_URL" ]; then

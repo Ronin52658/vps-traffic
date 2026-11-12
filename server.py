@@ -54,7 +54,15 @@ PORT = int(os.environ.get("VT_PORT", "8080"))
 TZ_NAME = os.environ.get("VT_TZ", "Asia/Shanghai")
 PUBLIC_URL = os.environ.get("VT_PUBLIC_URL", "").rstrip("/")
 REQUIRE_HTTPS = os.environ.get("VT_REQUIRE_HTTPS", "1").strip() != "0"
-PUBLIC_HOST = urllib.parse.urlparse(PUBLIC_URL).netloc.lower() if PUBLIC_URL else ""
+def _norm_host(h):
+    """Host 比较前去掉 https 默认端口和末尾的点"""
+    h = (h or "").strip().lower()
+    if h.endswith(":443"):
+        h = h[:-4]
+    return h.rstrip(".")
+
+
+PUBLIC_HOST = _norm_host(urllib.parse.urlparse(PUBLIC_URL).netloc) if PUBLIC_URL else ""
 HSTS_MAX_AGE = 31536000         # 浏览器记住一年：之后自动只用 HTTPS 访问该域名
 TG_TOKEN = os.environ.get("VT_TG_TOKEN", "")
 TG_CHAT = os.environ.get("VT_TG_CHAT", "")
@@ -1088,6 +1096,20 @@ def normalize_restored(conn):
                       _json_clean(r["metrics"], parse_sys), _json_clean(r["sysinfo"], parse_info),
                       _ip_or_empty(r["public_ip"]), cc(r["country"]), _ip_or_empty(r["geo_ip"]), cc(r["geo_country"]),
                       r["id"]))
+    # 可恢复的普通设置：名称、主题、间隔都按正常修改时的规则校验，不合格就删掉用默认值
+    name = get_setting(conn, "site_name")
+    if name is not None:
+        name = re.sub(r"[\x00-\x1f<>]", "", str(name)).strip()
+        if 1 <= len(name) <= 40:
+            set_setting(conn, "site_name", name)
+        else:
+            conn.execute("DELETE FROM settings WHERE k='site_name'")
+    if get_setting(conn, "theme") not in (None,) + THEMES:
+        conn.execute("DELETE FROM settings WHERE k='theme'")
+    for k in ("interval", "idle_interval"):
+        v = get_setting(conn, k)
+        if v is not None and not (str(v).isdigit() and 1 <= int(v) <= 300):
+            conn.execute("DELETE FROM settings WHERE k=?", (k,))
     # 周期：数值列必须是整数，计费方式/原因/告警等级必须是已知值
     conn.execute("""DELETE FROM cycles WHERE typeof(server_id)!='integer' OR server_id NOT IN (SELECT id FROM servers)
                       OR typeof(start_ts)!='integer' OR typeof(rx)!='integer' OR typeof(tx)!='integer' OR rx<0 OR tx<0
@@ -1251,7 +1273,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Strict-Transport-Security", f"max-age={HSTS_MAX_AGE}")
         # 禁止被别的页面嵌入（防点击劫持）、禁止猜测类型、不外泄来源地址
         self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        # 页面不加载任何外部资源：脚本、样式、图片、请求都只许来自面板自己，
+        # 即使将来出现注入，也无法加载外部脚本或把数据发到别的网站
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+                         "img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; "
+                         "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         super().end_headers()
@@ -1262,7 +1289,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.from_proxy():
                 return "面板只能通过 HTTPS 反代访问，不能直接用 IP:端口 访问"
             return "反代没有使用 HTTPS（X-Forwarded-Proto 不是 https）"
-        if PUBLIC_HOST and (self.headers.get("Host") or "").lower() != PUBLIC_HOST:
+        if PUBLIC_HOST and _norm_host(self.headers.get("Host")) != PUBLIC_HOST:
             return f"请使用 {PUBLIC_URL} 访问"
         return ""
 
@@ -1287,7 +1314,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         origin = self.headers.get("Origin")
         if origin:
-            return urllib.parse.urlparse(origin).netloc.lower() == (self.headers.get("Host") or "").lower()
+            return _norm_host(urllib.parse.urlparse(origin).netloc) == _norm_host(self.headers.get("Host"))
         return True
 
     # ---- helpers
@@ -1519,8 +1546,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"start": start_d.isoformat(), "end": end_d.isoformat(), "servers": items,
                                         "rx": sum(i["rx"] for i in items), "tx": sum(i["tx"] for i in items)})
         if path == "/api/password" and method == "POST":
+            ip = self.client_ip()
+            left = login_locked(ip)
+            if left:
+                return self.send_json(429, {"error": f"尝试次数过多，请 {left // 60 + 1} 分钟后再试"})
             b = self.read_json()
             if not check_password(str(b.get("old", ""))):
+                login_failed(ip)                    # 和登录共用限流，防止拿到会话的人暴力猜原密码
+                time.sleep(1)
                 return self.send_json(400, {"error": "当前密码不正确"})
             new = str(b.get("new", ""))
             if len(new) < 8:
