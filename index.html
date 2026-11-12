@@ -225,6 +225,9 @@ tr.total td{border-bottom:0}
 
 form{display:grid;gap:14px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+details.alt{margin-top:12px}
+details.alt summary{cursor:pointer;color:var(--muted);font-size:13.5px;padding:4px 0}
+details.alt[open] summary{margin-bottom:6px}
 pre.cmd{user-select:all;-webkit-user-select:all;border-radius:12px;box-shadow:var(--inset-sm);padding:12px;white-space:pre-wrap;word-break:break-all;font-size:12px;margin:8px 0 12px}
 h3{font-size:15px;margin:0 0 6px}
 .order{display:grid;gap:10px}
@@ -840,6 +843,36 @@ function installCmd(token) {
     `rm -f ${f}`,
   ].join("\n");
 }
+// VPS 连不上 GitHub 时的两种装法：手动上传文件 / 经镜像下载。两种都照样校验 SHA256
+const MIRROR = "https://ghfast.top/";
+function altInstallHtml(token) {
+  const b = META.base_url, a = META.agent;
+  if (!a) return "";
+  const raw = `https://raw.githubusercontent.com/${a.repo}/${a.commit}`, iv = META.interval || 3;
+  const dl = `curl -fsSLO ${raw}/install.sh\ncurl -fsSLO ${raw}/agent.sh`;
+  const off = `cd /root && echo "${a.install_sha256}  install.sh" | sha256sum -c - && sh install.sh --agent-file agent.sh --server '${b}' --token ${token} --interval ${iv} && rm -f install.sh agent.sh`;
+  const f = "/root/vps-traffic-install.sh";
+  const mir = [
+    `curl -fsSL --proto '=https' -o ${f} ${MIRROR}${raw}/install.sh`,
+    `echo "${a.install_sha256}  ${f}" | sha256sum -c - && sh ${f} --ref ${a.commit} --mirror ${MIRROR} --server '${b}' --token ${token} --interval ${iv}`,
+    `rm -f ${f}`,
+  ].join("\n");
+  return `<details class="alt">
+    <summary>VPS 连不上 GitHub？</summary>
+    <p class="hint"><b>方法一：手动上传（完全不需要访问 GitHub）</b><br>① 在能访问 GitHub 的机器上（比如面板机器）下载这两个文件：</p>
+    <pre class="cmd" id="altDl">${esc(dl)}</pre>
+    <p class="hint">② 把 <code>install.sh</code> 和 <code>agent.sh</code> 传到 VPS 的 <code>/root/</code>，例如 <code>scp install.sh agent.sh root@VPS地址:/root/</code><br>③ 在 VPS 上用 root 运行：</p>
+    <pre class="cmd" id="altOff">${esc(off)}</pre>
+    <div class="actions"><button class="btn" data-copy="altOff">复制第 ③ 步命令</button></div>
+    <p class="hint" style="margin-top:14px"><b>方法二：经镜像下载</b>（镜像是第三方服务，可能失效；下载的文件照样校验 SHA256，镜像改不了内容）</p>
+    <pre class="cmd" id="altMir">${esc(mir)}</pre>
+    <div class="actions"><button class="btn" data-copy="altMir">复制镜像命令</button></div>
+  </details>`;
+}
+function fillAltInstall(el, token) {
+  el.innerHTML = altInstallHtml(token);
+  el.querySelectorAll("[data-copy]").forEach(btn => btn.onclick = () => copyText($("#" + btn.dataset.copy).textContent));
+}
 // navigator.clipboard 只在 HTTPS 或 localhost 下可用；用 IP:端口 访问时退回到 execCommand
 function copyText(t) {
   const fallback = () => {
@@ -875,6 +908,7 @@ function tabSettings(s) {
         <button class="btn" id="copyBtn">复制命令</button>
         <button class="btn" id="tokenBtn">重新生成 Token</button>
       </div>
+      <div id="altBox"></div>
       <p class="hint" style="margin-top:10px">脚本从 GitHub 固定提交 <code>${esc((META.agent && META.agent.commit || "").slice(0, 7))}</code> 下载，install.sh 和 agent.sh 都会先校验 SHA256，不一致就中止。默认自动检测默认路由网卡；要指定网卡可在第二行末尾加 <code>--iface eth0</code>。</p>
     </div>
     <div class="card">
@@ -889,11 +923,12 @@ function tabSettings(s) {
     await api(`/api/servers/${CUR}`, {method: "PUT", body: JSON.stringify(d)});
     toast("已保存设置"); renderDetail();
   });
+  fillAltInstall($("#altBox"), s.token);
   $("#copyBtn").onclick = () => copyText($("#cmd").textContent);
   $("#tokenBtn").onclick = async () => {
     if (!confirm("重新生成后，旧 Token 立即失效，需要在 VPS 上重新运行安装命令。继续？")) return;
     const r = await api(`/api/servers/${CUR}/token`, {method: "POST"});
-    $("#cmd").textContent = installCmd(r.token); toast("已重新生成 Token");
+    $("#cmd").textContent = installCmd(r.token); fillAltInstall($("#altBox"), r.token); toast("已重新生成 Token");
   };
   $("#resetBtn").onclick = async () => {
     if (!confirm(`立即重置“${s.name}”的流量？当前周期会保存到历史。`)) return;
@@ -914,7 +949,9 @@ function openAdd() {
       <h3>已新增“${esc(d.name)}”</h3>
       <p class="hint">在这台 VPS 上用 root 运行以下命令，大约一分钟后开始出现数据：</p>
       <pre class="cmd" id="cmd">${esc(installCmd(r.token))}</pre>
-      <div class="actions"><button class="btn primary" id="copyBtn">复制命令</button><button class="btn" id="doneBtn">完成</button></div>`;
+      <div class="actions"><button class="btn primary" id="copyBtn">复制命令</button><button class="btn" id="doneBtn">完成</button></div>
+      <div id="altBox" style="margin-top:14px"></div>`;
+    fillAltInstall($("#altBox"), r.token);
     $("#copyBtn").onclick = () => copyText($("#cmd").textContent);
     $("#doneBtn").onclick = closeSheet;
   });

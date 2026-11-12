@@ -95,6 +95,16 @@ rm -f /root/vps-traffic-install.sh
 - 两层校验：命令先校验 install.sh 的 SHA256（来自面板的 `agent_pin.json`），install.sh 再校验 agent.sh 的 SHA256（写在 install.sh 里），任何一层不一致都中止，不会改动 VPS。
 - 可选参数加在第二行末尾：`--iface eth0` 指定网卡（默认自动检测默认路由），`--interval 3` 初始上报间隔（秒）。
 
+### VPS 连不上 GitHub
+
+服务器“设置”里的安装命令下方有“VPS 连不上 GitHub？”，展开后有两种装法，面板会按这台服务器的 Token 生成好命令：
+
+- **手动上传**：在能访问 GitHub 的机器（比如面板机器）上下载固定提交的 `install.sh` 和 `agent.sh`，传到 VPS 的 `/root/`，再运行
+  `sh install.sh --agent-file agent.sh --server ... --token ...`。全程不需要 VPS 访问 GitHub。
+- **经镜像下载**：在原命令的下载地址前加镜像前缀，并给 install.sh 加 `--mirror https://ghfast.top/`，agent.sh 也会经同一个镜像下载。镜像是第三方服务，可能失效，换成别的前缀即可（格式为 `https://镜像地址/` 后面直接接 GitHub 原地址）。
+
+两种方式都照样校验 SHA256：install.sh 的哈希由面板给出，agent.sh 的哈希写在 install.sh 里，文件被改过就会中止安装，所以经第三方镜像或手动传文件都不会装上被篡改的版本。
+
 ### 发布新版 Agent
 
 1. 修改 `agent.sh` 或 `install.sh`；改过 agent.sh 的话运行 `sh tools/pin_agent.sh hash`，把新哈希写进 install.sh
