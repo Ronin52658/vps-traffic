@@ -501,7 +501,7 @@ const LS_KEY = "vt-demo-login";
 let loggedIn = false;
   // 演示站主题默认跟随查看者当前的设置
   let theme0 = "system"; try { theme0 = localStorage.getItem("vt-theme") || "system"; } catch (e) {}
-  const IV = {interval: 3, idle_interval: 60, site_name: "VPS 流量", theme: theme0};
+  const IV = {interval: 3, idle_interval: 60, site_name: "VPS 流量", theme: theme0, offline_notify: true, offline_after: 180};
 try { loggedIn = Number(localStorage.getItem(LS_KEY) || 0) > Date.now(); } catch (e) {}
 const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.now() + 30 * 86400000)) : localStorage.removeItem(LS_KEY); } catch (e) {} };
   const LT = [
@@ -529,7 +529,8 @@ const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.no
       return R(200, {start: iso(start), end: iso(end - D), servers, rx: servers.reduce((a, x) => a + x.rx, 0), tx: servers.reduce((a, x) => a + x.tx, 0)});
     }
     if (path === "/api/password") return R(400, {error: "演示站不能修改密码"});
-    if (path === "/api/meta") return R(200, {tz: "Asia/Shanghai", now, base_url: "https://traffic.example.com", telegram: true, session_days: 30, interval: IV.interval, idle_interval: IV.idle_interval, site_name: IV.site_name, agent: {repo: "Ronin52658/vps-traffic", commit: "0123456789abcdef0123456789abcdef01234567", install_sha256: "0".repeat(64)}});
+    if (path === "/api/meta") return R(200, {tz: "Asia/Shanghai", now, base_url: "https://traffic.example.com", telegram: true, session_days: 30, interval: IV.interval, idle_interval: IV.idle_interval, site_name: IV.site_name, agent: {repo: "Ronin52658/vps-traffic", commit: "0123456789abcdef0123456789abcdef01234567", install_sha256: "0".repeat(64)}, offline_notify: IV.offline_notify, offline_after: IV.offline_after, offline_effective: Math.max(IV.offline_after, IV.idle_interval * 2 + 30)});
+    if (path === "/api/notify/test") return R(400, {error: "演示站不会真的发送 Telegram 消息"});
     if (path === "/api/order" && method === "POST") {
       const ids = body.ids || [];
       S.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
@@ -548,7 +549,9 @@ const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.no
       for (const k of ["interval", "idle_interval"]) if (k in body) {
         const n = +body[k]; if (!Number.isInteger(n) || n < 1 || n > 300) throw new Error("间隔须在 1–300 秒"); IV[k] = n;
       }
-      return R(200, {ok: true, ...IV});
+      if ("offline_notify" in body) IV.offline_notify = !!body.offline_notify;
+      if ("offline_after" in body) { const n = +body.offline_after; if (!(n >= 60 && n <= 3600)) throw new Error("离线判定时间须在 1–60 分钟"); IV.offline_after = n; }
+      return R(200, {ok: true, ...IV, offline_effective: Math.max(IV.offline_after, IV.idle_interval * 2 + 30)});
     }
     if (path === "/api/restore" && method === "POST") {
       const head = new Uint8Array(await body.slice(0, 16).arrayBuffer());
@@ -1209,6 +1212,9 @@ function serverForm(s = {}) {
       <label>间隔天数<input name="interval_days" type="number" min="1" max="3650" value="${+s.interval_days || 30}"></label>
       <label>起算日期<input name="anchor" type="date" value="${s.anchor || ""}"></label>
     </div>
+    <div class="checks" style="grid-template-columns:1fr;max-height:none;padding:0">
+      <label><input type="checkbox" name="notify_offline" ${s.notify_offline === false ? "" : "checked"}>离线 / 恢复上线时发送 Telegram 通知</label>
+    </div>
     <p class="err" id="formErr"></p>
     <div class="actions"><button class="btn primary" type="submit">${s.id ? "保存设置" : "新增服务器"}</button></div>
   </form>`;
@@ -1221,6 +1227,7 @@ function bindForm(onSubmit) {
     e.preventDefault();
     const d = Object.fromEntries(new FormData(f));
     d.quota_gb = +d.quota_gb; d.reset_day = +d.reset_day; d.interval_days = +d.interval_days;
+    d.notify_offline = f.notify_offline.checked;
     if (!d.anchor) delete d.anchor;
     try { await onSubmit(d); } catch (err) { $("#formErr").textContent = err.message; }
   };
@@ -1695,6 +1702,20 @@ function openSettings() {
       </form>
     </div>
     <div class="card">
+      <h3>离线通知</h3>
+      <p class="hint" style="margin-bottom:12px">VPS 超过设定时间没有上报就算离线，离线和恢复上线时各发一条 Telegram 消息；多台同时离线会合并成一条。面板刚重启的几分钟内不判定离线，避免误报。单台服务器可以在它的“设置”分页里关掉通知。</p>
+      <p class="hint" style="margin-bottom:12px" id="tgState">${META.telegram ? "Telegram：已配置" : "Telegram：<b>未配置</b>。在面板机器的 <code>/etc/vps-traffic-panel.env</code> 里填 <code>VT_TG_TOKEN</code> 和 <code>VT_TG_CHAT</code>，再 <code>systemctl restart vps-traffic-panel</code>。"}</p>
+      <form id="ntForm">
+        <div class="grid2">
+          <label>通知<select name="on"><option value="1" ${META.offline_notify !== false ? "selected" : ""}>开启</option><option value="0" ${META.offline_notify === false ? "selected" : ""}>关闭</option></select></label>
+          <label>离线判定（分钟）<input type="number" name="after" min="1" max="60" step="1" value="${Math.round((META.offline_after || 180) / 60)}" required></label>
+        </div>
+        <p class="hint num" id="ntHint"></p>
+        <p class="err" id="ntErr"></p>
+        <div class="actions"><button class="btn primary" type="submit">保存</button><button class="btn" type="button" id="ntTest" ${META.telegram ? "" : "disabled"}>发送测试消息</button></div>
+      </form>
+    </div>
+    <div class="card">
       <h3>修改密码</h3>
       <form id="pwForm" style="margin-top:10px">
         <label>当前密码<input type="password" name="old" autocomplete="current-password" required></label>
@@ -1729,6 +1750,24 @@ function openSettings() {
 
   $("#addBtn").onclick = openAdd;
   $("#latMgrBtn").onclick = openLatency;
+  const ntHint = () => {
+    const eff = META.offline_effective || 180, set = META.offline_after || 180;
+    $("#ntHint").textContent = eff > set ? `空闲上报间隔较长，实际按 ${Math.round(eff / 60 * 10) / 10} 分钟判定离线（至少是空闲间隔的两倍再加 30 秒）。` : "";
+  };
+  ntHint();
+  $("#ntForm").onsubmit = async e => {
+    e.preventDefault();
+    try {
+      const r = await api("/api/settings", {method: "POST", body: JSON.stringify({offline_notify: e.target.on.value === "1", offline_after: Math.round(+e.target.after.value * 60)})});
+      Object.assign(META, {offline_notify: r.offline_notify, offline_after: r.offline_after, offline_effective: r.offline_effective});
+      $("#ntErr").textContent = ""; ntHint(); toast("已保存离线通知设置");
+    } catch (err) { $("#ntErr").textContent = err.message; }
+  };
+  $("#ntTest").onclick = async () => {
+    $("#ntErr").textContent = "";
+    try { await api("/api/notify/test", {method: "POST"}); toast("已发送，请查看 Telegram"); }
+    catch (err) { $("#ntErr").textContent = err.message; }
+  };
   $("#nameForm").onsubmit = async e => {
     e.preventDefault();
     try {

@@ -40,6 +40,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
@@ -73,7 +74,10 @@ LATENCY_INTERVALS = (30, 60, 120, 300)   # 可选的探测间隔（秒）
 MAX_LATENCY_TASKS = 50
 MAX_LAT_ITEMS = 300             # 单次上报最多带多少条延迟结果
 HOURLY_KEEP_DAYS = 400          # 小时明细保留天数；周期记录永久保留
-OFFLINE_AFTER = 180             # 超过几秒没上报视为离线
+OFFLINE_AFTER = 180             # 超过几秒没上报视为离线（可在“设置”里改，60–3600 秒）
+DEFAULT_OFFLINE_AFTER = 180
+OFFLINE_NOTIFY = True           # 离线 / 恢复上线时发 Telegram 通知（可在“设置”里关）
+START_TIME = time.time()
 MAX_DELTA = 50 * 1024 ** 4      # 单次上报上限 50 TiB，防止异常数据
 ALERT_LEVELS = (80, 95, 100)
 MAX_RESTORE = 1024 ** 3        # 还原档上限 1 GiB
@@ -92,7 +96,7 @@ MAX_FAIL_ENTRIES = 10000        # 登录失败记录上限，防止内存无限�
 CSRF_HEADER = "X-VT-Request"    # 网页发出的改动请求必须带这个头，跨源页面无法伪造
 # 还原备份时，这些设置沿用当前面板的值，不从备份里读（备份可能被人改过）
 SECURITY_SETTINGS = ("secret", "password_hash", "revoked_sessions", "login_ips")
-RESTORABLE_SETTINGS = ("interval", "idle_interval", "site_name", "theme")
+RESTORABLE_SETTINGS = ("interval", "idle_interval", "site_name", "theme", "offline_notify", "offline_after")
 
 
 def _parse_proxies(v):
@@ -260,6 +264,8 @@ CREATE TABLE IF NOT EXISTS latency_minute(
 
 # 旧版数据库或旧备份缺的字段，启动和还原时自动补上
 SERVER_COLUMNS = {
+    "notify_offline": "INTEGER NOT NULL DEFAULT 1",
+    "alive_state": "TEXT NOT NULL DEFAULT ''",
     "metrics": "TEXT NOT NULL DEFAULT ''",
     "sysinfo": "TEXT NOT NULL DEFAULT ''",
     "public_ip": "TEXT NOT NULL DEFAULT ''",
@@ -335,10 +341,35 @@ def _clamp(v, default):
 
 
 def load_interval():
-    global REPORT_INTERVAL, IDLE_INTERVAL
+    global REPORT_INTERVAL, IDLE_INTERVAL, OFFLINE_AFTER, OFFLINE_NOTIFY
     with txn() as conn:
         REPORT_INTERVAL = _clamp(get_setting(conn, "interval"), DEFAULT_INTERVAL)
         IDLE_INTERVAL = _clamp(get_setting(conn, "idle_interval"), DEFAULT_IDLE)
+        try:
+            OFFLINE_AFTER = min(3600, max(60, int(get_setting(conn, "offline_after") or DEFAULT_OFFLINE_AFTER)))
+        except ValueError:
+            OFFLINE_AFTER = DEFAULT_OFFLINE_AFTER
+        OFFLINE_NOTIFY = get_setting(conn, "offline_notify") != "0"
+
+
+def offline_after():
+    """实际使用的离线判定时间：至少是空闲上报间隔的两倍再加 30 秒，避免没人看面板时被误判离线"""
+    return max(OFFLINE_AFTER, IDLE_INTERVAL * 2 + 30)
+
+
+def set_notify(enabled=None, after=None):
+    with txn() as conn:
+        if enabled is not None:
+            set_setting(conn, "offline_notify", "1" if enabled else "0")
+        if after is not None:
+            try:
+                n = int(after)
+            except (TypeError, ValueError):
+                raise ValueError("离线判定时间须为整数")
+            if not 60 <= n <= 3600:
+                raise ValueError("离线判定时间须在 1–60 分钟")
+            set_setting(conn, "offline_after", str(n))
+    load_interval()
 
 
 DEFAULT_SITE_NAME = "VPS 流量"
@@ -346,7 +377,11 @@ DEFAULT_SITE_NAME = "VPS 流量"
 
 def get_site_name():
     with txn() as conn:
-        return get_setting(conn, "site_name") or DEFAULT_SITE_NAME
+        return get_site_name_conn(conn)
+
+
+def get_site_name_conn(conn):
+    return get_setting(conn, "site_name") or DEFAULT_SITE_NAME
 
 
 THEMES = ("system", "light", "dark")
@@ -593,17 +628,74 @@ def ensure_cycle(conn, srv, now=None):
 
 # ---------------------------------------------------------------- 通知
 
+def tg_send_now(text):
+    """同步发送，失败抛异常（“发送测试消息”用）"""
+    data = urllib.parse.urlencode({"chat_id": TG_CHAT, "text": text}).encode()
+    try:
+        urllib.request.urlopen(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data, timeout=10).read()
+    except urllib.error.HTTPError as e:
+        try:
+            desc = json.loads(e.read()).get("description", "")
+        except Exception:
+            desc = ""
+        raise RuntimeError(f"Telegram 返回 {e.code} {desc}".strip())   # 不带 URL，免得 Bot Token 出现在日志里
+    except Exception as e:
+        raise RuntimeError(f"连不上 Telegram：{getattr(e, 'reason', e)}")
+
+
 def tg_send(text):
     if not (TG_TOKEN and TG_CHAT):
         return
 
     def run():
         try:
-            data = urllib.parse.urlencode({"chat_id": TG_CHAT, "text": text}).encode()
-            urllib.request.urlopen(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data, timeout=10)
+            tg_send_now(text)
         except Exception as e:
             print(f"[tg] 发送失败：{e}")
     threading.Thread(target=run, daemon=True).start()
+
+
+def fmt_dur(sec):
+    sec = max(0, int(sec))
+    d, h, m = sec // 86400, sec % 86400 // 3600, sec % 3600 // 60
+    if d:
+        return f"{d} 天 {h} 小时"
+    if h:
+        return f"{h} 小时 {m} 分钟"
+    return f"{max(1, m)} 分钟"
+
+
+def fmt_time(ts):
+    return datetime.fromtimestamp(ts, TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def alive_loop():
+    """每 15 秒检查一次：在线的机器超过离线判定时间没上报，就标记离线并通知（多台同时离线合并成一条）。
+    面板刚启动的一段时间内不判定离线：面板停机期间所有机器都没法上报，重启后不应该误报"""
+    while True:
+        time.sleep(15)
+        try:
+            check_alive(int(time.time()))
+        except Exception as e:
+            print(f"[alive] {e}")
+
+
+def check_alive(now):
+    limit = offline_after()
+    if now - START_TIME < limit + 15:
+        return
+    gone = []
+    with txn() as conn:
+        for r in conn.execute("SELECT id, name, last_seen, notify_offline FROM servers "
+                              "WHERE alive_state='online' AND last_seen<?", (now - limit,)).fetchall():
+            conn.execute("UPDATE servers SET alive_state='offline' WHERE id=?", (r["id"],))
+            if r["notify_offline"]:
+                gone.append(r)
+    if gone and OFFLINE_NOTIFY:
+        site = get_site_name()
+        lines = [f"· {r['name']}（最后上报 {fmt_time(r['last_seen'])}，{fmt_dur(now - r['last_seen'])}前）" for r in gone]
+        head = f"🔴 [{site}] {gone[0]['name']} 离线" if len(gone) == 1 else f"🔴 [{site}] {len(gone)} 台 VPS 离线"
+        tg_send(head + "\n" + "\n".join(lines))
 
 
 def fmt_bytes(n):
@@ -747,6 +839,10 @@ def handle_report(token, body, ip=""):
                      (srv["id"], hour, rx, tx))
         cyc = ensure_cycle(conn, srv, now)
         conn.execute("UPDATE cycles SET rx=rx+?, tx=tx+? WHERE id=?", (rx, tx, cyc["id"]))
+        if srv["alive_state"] != "online":
+            conn.execute("UPDATE servers SET alive_state='online' WHERE id=?", (srv["id"],))
+            if srv["alive_state"] == "offline" and srv["notify_offline"] and OFFLINE_NOTIFY:
+                tg_send(f"🟢 [{get_site_name_conn(conn)}] {srv['name']} 恢复上线\n离线时长：{fmt_dur(now - srv['last_seen'])}")
         t = time.time()
         gap = t - LAST_REPORT.get(srv["id"], srv["last_seen"])
         LAST_REPORT[srv["id"]] = t
@@ -948,9 +1044,9 @@ def server_summary(conn, srv, now):
     t0 = today_start(now)
     td = conn.execute("SELECT COALESCE(SUM(rx),0) rx, COALESCE(SUM(tx),0) tx FROM traffic_hourly "
                       "WHERE server_id=? AND ts>=?", (srv["id"], t0)).fetchone()
-    online = now - srv["last_seen"] <= OFFLINE_AFTER
+    online = now - srv["last_seen"] <= offline_after()
     return {
-        "id": srv["id"], "name": srv["name"], "note": srv["note"],
+        "id": srv["id"], "name": srv["name"], "note": srv["note"], "notify_offline": bool(srv["notify_offline"]),
         "quota_gb": srv["quota_gb"], "billing": srv["billing"],
         "reset_type": srv["reset_type"], "reset_day": srv["reset_day"],
         "interval_days": srv["interval_days"], "anchor": srv["anchor"] or anchor_date(srv).isoformat(),
@@ -1060,7 +1156,8 @@ VALID_BILLING = {"sum", "out", "in", "max"}
 VALID_RESET = {"monthly", "interval", "manual"}
 
 
-SERVER_FIELDS = ("name", "note", "quota_gb", "billing", "reset_type", "reset_day", "interval_days", "country", "anchor")
+SERVER_FIELDS = ("name", "note", "quota_gb", "billing", "reset_type", "reset_day", "interval_days", "country", "anchor",
+                 "notify_offline")
 
 
 def clean_server_input(b, partial=False):
@@ -1105,6 +1202,8 @@ def clean_server_input(b, partial=False):
         if c and not re.fullmatch(r"[A-Z]{2}", c):
             raise ValueError("地区请填两位国家代码，例如 SG、HK、US")
         out["country"] = c
+    if "notify_offline" in b:
+        out["notify_offline"] = 1 if b["notify_offline"] in (True, 1, "1", "on", "true") else 0
     if "anchor" in b:
         a = b.get("anchor") or None
         if a:
@@ -1284,6 +1383,13 @@ def normalize_restored(conn):
                       _json_clean(r["metrics"], parse_sys), _json_clean(r["sysinfo"], parse_info),
                       _ip_or_empty(r["public_ip"]), cc(r["country"]), _ip_or_empty(r["geo_ip"]), cc(r["geo_country"]),
                       r["id"]))
+    # 离线通知：开关只能是 0/1；在线状态一律清空，等 Agent 重新上报，避免还原后误报离线/上线
+    conn.execute("UPDATE servers SET notify_offline=CASE WHEN notify_offline=0 THEN 0 ELSE 1 END, alive_state=''")
+    if get_setting(conn, "offline_notify") not in (None, "0", "1"):
+        conn.execute("DELETE FROM settings WHERE k='offline_notify'")
+    v = get_setting(conn, "offline_after")
+    if v is not None and not (str(v).isdigit() and 60 <= int(v) <= 3600):
+        conn.execute("DELETE FROM settings WHERE k='offline_after'")
     # 可恢复的普通设置：名称、主题、间隔都按正常修改时的规则校验，不合格就删掉用默认值
     name = get_setting(conn, "site_name")
     if name is not None:
@@ -1732,6 +1838,9 @@ class Handler(BaseHTTPRequestHandler):
                 if os.path.exists(p):
                     os.remove(p)
 
+    def notify_meta(self):
+        return {"offline_notify": OFFLINE_NOTIFY, "offline_after": OFFLINE_AFTER, "offline_effective": offline_after()}
+
     def api_latency(self, method, path, now):
         """延迟监测任务管理：任务视图（每个目标选哪些服务器）和服务器视图（每台服务器测哪些目标）"""
         if path == "/api/latency" and method == "GET":
@@ -1852,7 +1961,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "telegram": bool(TG_TOKEN and TG_CHAT),
                                         "session_days": SESSION_TTL // 86400,
                                         "interval": REPORT_INTERVAL, "idle_interval": IDLE_INTERVAL,
-                                        "site_name": get_site_name(), "agent": AGENT_PIN})
+                                        "site_name": get_site_name(), "agent": AGENT_PIN, **self.notify_meta()})
         if path == "/api/settings" and method == "POST":
             b = self.read_json()
             set_intervals(b.get("interval"), b.get("idle_interval"))
@@ -1863,8 +1972,18 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("主题无效")
                 with txn() as conn:
                     set_setting(conn, "theme", b["theme"])
+            if "offline_notify" in b or "offline_after" in b:
+                set_notify(bool(b["offline_notify"]) if "offline_notify" in b else None, b.get("offline_after"))
             return self.send_json(200, {"ok": True, "interval": REPORT_INTERVAL, "idle_interval": IDLE_INTERVAL,
-                                        "site_name": get_site_name()})
+                                        "site_name": get_site_name(), **self.notify_meta()})
+        if path == "/api/notify/test" and method == "POST":
+            if not (TG_TOKEN and TG_CHAT):
+                raise ValueError("还没有配置 Telegram：在面板机器的 /etc/vps-traffic-panel.env 里填 VT_TG_TOKEN 和 VT_TG_CHAT，再重启面板")
+            try:
+                tg_send_now(f"✅ [{get_site_name()}] 测试消息：Telegram 通知配置正常")
+            except RuntimeError as e:
+                raise ValueError(str(e))
+            return self.send_json(200, {"ok": True})
         if path.startswith("/api/latency"):
             return self.api_latency(method, path, now)
         if path == "/api/order" and method == "POST":
@@ -1893,8 +2012,8 @@ class Handler(BaseHTTPRequestHandler):
                         " VALUES(?,?,?,?,?,?,?,?,?,?)",
                         (f["name"], f.get("note", ""), token, f["quota_gb"], f["billing"], f["reset_type"],
                          f["reset_day"], f["interval_days"], f["anchor"], now))
-                    conn.execute("UPDATE servers SET country=?, sort=(SELECT COALESCE(MAX(sort),0)+1 FROM servers) WHERE id=?",
-                                 (f.get("country", ""), cur.lastrowid))
+                    conn.execute("UPDATE servers SET country=?, notify_offline=?, sort=(SELECT COALESCE(MAX(sort),0)+1 FROM servers) WHERE id=?",
+                                 (f.get("country", ""), f.get("notify_offline", 1), cur.lastrowid))
                     srv = conn.execute("SELECT * FROM servers WHERE id=?", (cur.lastrowid,)).fetchone()
                     ensure_cycle(conn, srv, now)
                     return self.send_json(200, {"id": srv["id"], "token": token})
@@ -2001,6 +2120,7 @@ def main():
         print("密码已更新，请重启服务：systemctl restart vps-traffic-panel")
         return
     threading.Thread(target=maintenance_loop, daemon=True).start()
+    threading.Thread(target=alive_loop, daemon=True).start()
     httpd = LimitedServer((LISTEN, PORT), Handler)
     print(f"[start] 面板运行于 http://{LISTEN}:{PORT}  时区 {TZ_NAME}")
     if REQUIRE_HTTPS:

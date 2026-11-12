@@ -187,7 +187,7 @@ const LS_KEY = "vt-demo-login";
 let loggedIn = false;
   // 演示站主题默认跟随查看者当前的设置
   let theme0 = "system"; try { theme0 = localStorage.getItem("vt-theme") || "system"; } catch (e) {}
-  const IV = {interval: 3, idle_interval: 60, site_name: "VPS 流量", theme: theme0};
+  const IV = {interval: 3, idle_interval: 60, site_name: "VPS 流量", theme: theme0, offline_notify: true, offline_after: 180};
 try { loggedIn = Number(localStorage.getItem(LS_KEY) || 0) > Date.now(); } catch (e) {}
 const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.now() + 30 * 86400000)) : localStorage.removeItem(LS_KEY); } catch (e) {} };
   const LT = [
@@ -215,7 +215,8 @@ const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.no
       return R(200, {start: iso(start), end: iso(end - D), servers, rx: servers.reduce((a, x) => a + x.rx, 0), tx: servers.reduce((a, x) => a + x.tx, 0)});
     }
     if (path === "/api/password") return R(400, {error: "演示站不能修改密码"});
-    if (path === "/api/meta") return R(200, {tz: "Asia/Shanghai", now, base_url: "https://traffic.example.com", telegram: true, session_days: 30, interval: IV.interval, idle_interval: IV.idle_interval, site_name: IV.site_name, agent: {repo: "Ronin52658/vps-traffic", commit: "0123456789abcdef0123456789abcdef01234567", install_sha256: "0".repeat(64)}});
+    if (path === "/api/meta") return R(200, {tz: "Asia/Shanghai", now, base_url: "https://traffic.example.com", telegram: true, session_days: 30, interval: IV.interval, idle_interval: IV.idle_interval, site_name: IV.site_name, agent: {repo: "Ronin52658/vps-traffic", commit: "0123456789abcdef0123456789abcdef01234567", install_sha256: "0".repeat(64)}, offline_notify: IV.offline_notify, offline_after: IV.offline_after, offline_effective: Math.max(IV.offline_after, IV.idle_interval * 2 + 30)});
+    if (path === "/api/notify/test") return R(400, {error: "演示站不会真的发送 Telegram 消息"});
     if (path === "/api/order" && method === "POST") {
       const ids = body.ids || [];
       S.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
@@ -234,7 +235,9 @@ const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.no
       for (const k of ["interval", "idle_interval"]) if (k in body) {
         const n = +body[k]; if (!Number.isInteger(n) || n < 1 || n > 300) throw new Error("间隔须在 1–300 秒"); IV[k] = n;
       }
-      return R(200, {ok: true, ...IV});
+      if ("offline_notify" in body) IV.offline_notify = !!body.offline_notify;
+      if ("offline_after" in body) { const n = +body.offline_after; if (!(n >= 60 && n <= 3600)) throw new Error("离线判定时间须在 1–60 分钟"); IV.offline_after = n; }
+      return R(200, {ok: true, ...IV, offline_effective: Math.max(IV.offline_after, IV.idle_interval * 2 + 30)});
     }
     if (path === "/api/restore" && method === "POST") {
       const head = new Uint8Array(await body.slice(0, 16).arrayBuffer());
