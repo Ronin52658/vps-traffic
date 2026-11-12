@@ -1,11 +1,18 @@
 #!/bin/sh
-# Agent 一键安装 / 卸载
-#   安装：curl -fsSL <面板>/install.sh | sh -s -- --server <面板> --token <TOKEN> [--iface eth0] [--interval 3]
-#   卸载：curl -fsSL <面板>/install.sh | sh -s -- --uninstall
+# Agent 一键安装 / 卸载（从 GitHub 固定提交下载，校验 SHA256 后才安装）
+#   面板“新增服务器”会生成完整命令：先下载本脚本并校验 SHA256，再运行
+#   安装：sh install.sh --ref <提交> --server <面板> --token <TOKEN> [--iface eth0] [--interval 3]
+#   卸载：sh install.sh --uninstall
 set -e
-SERVER="" TOKEN="" IFACE="auto" INTERVAL=3 UNINSTALL=0
+
+# agent.sh 的 SHA256：agent.sh 每次修改后用 sh tools/pin_agent.sh hash 更新
+REPO="Ronin52658/vps-traffic"
+AGENT_SHA256="ec23c6953b08827403722c059fefae9f0f437b0561f81ac68d29371d4c1ac125"
+
+SERVER="" TOKEN="" IFACE="auto" INTERVAL=3 UNINSTALL=0 REF=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    --ref) REF=$2; shift 2 ;;
     --server) SERVER=${2%/}; shift 2 ;;
     --token) TOKEN=$2; shift 2 ;;
     --iface) IFACE=$2; shift 2 ;;
@@ -27,19 +34,37 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 [ -n "$SERVER" ] && [ -n "$TOKEN" ] || { echo "需要 --server 与 --token"; exit 1; }
+# 只接受完整的 40 位提交哈希，不接受分支或标签（分支内容会变）
+printf '%s' "$REF" | grep -Eq '^[0-9a-f]{40}$' || { echo "需要 --ref <40 位提交哈希>"; exit 1; }
+command -v sha256sum >/dev/null 2>&1 || { echo "缺少 sha256sum（coreutils）"; exit 1; }
 
 fetch() {
-  if command -v curl >/dev/null 2>&1; then curl -fsSL "$1"; else wget -qO- "$1"; fi
+  if command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --tlsv1.2 -o "$2" "$1"; else wget -q --https-only -O "$2" "$1"; fi
 }
+
+# 先下载到临时文件并校验，通过后才替换正在用的 agent.sh
+mkdir -p /opt/vps-traffic
+TMP=$(mktemp /opt/vps-traffic/.agent.sh.XXXXXX)
+trap 'rm -f "$TMP"' EXIT
+URL="https://raw.githubusercontent.com/$REPO/$REF/agent.sh"
+fetch "$URL" "$TMP" || { echo "下载失败：$URL"; exit 1; }
+GOT=$(sha256sum "$TMP" | awk '{print $1}')
+if [ "$GOT" != "$AGENT_SHA256" ]; then
+  echo "agent.sh 的 SHA256 校验失败，已中止安装"
+  echo "  期望：$AGENT_SHA256"
+  echo "  实际：$GOT"
+  exit 1
+fi
+echo "agent.sh 校验通过（$REF）"
 
 # 旧版以 root 运行时留下的状态目录：先停掉旧 Agent 再删除，交给 systemd 重建（只损失几秒的计数）
 if [ -d /var/lib/vps-traffic ] && [ ! -L /var/lib/vps-traffic ]; then
   systemctl stop vps-traffic-agent 2>/dev/null || true
   rm -rf /var/lib/vps-traffic
 fi
-mkdir -p /opt/vps-traffic /etc/vps-traffic
-fetch "$SERVER/agent.sh" > /opt/vps-traffic/agent.sh
-chmod 755 /opt/vps-traffic/agent.sh
+mkdir -p /etc/vps-traffic
+chmod 755 "$TMP"
+mv -f "$TMP" /opt/vps-traffic/agent.sh
 
 umask 077
 cat > /etc/vps-traffic/agent.conf <<EOF

@@ -9,6 +9,8 @@ VPS 流量监控面板 - 服务端（仅用 Python 标准库，Python 3.9+）
   VT_DB          SQLite 路径，默认与本文件同目录的 traffic.db
   VT_TZ          计算日统计与重置点的时区，默认 Asia/Shanghai
   VT_PUBLIC_URL  面板对外地址（生成安装命令用），例如 https://traffic.example.com
+  VT_AGENT_REPO / VT_AGENT_COMMIT / VT_AGENT_INSTALL_SHA256
+                 覆盖 agent_pin.json：Agent 安装脚本所在的 GitHub 仓库、固定提交和 install.sh 的 SHA256
   VT_TG_TOKEN    Telegram Bot Token（可选）
   VT_TG_CHAT     Telegram Chat ID（可选）
   VT_SESSION_DAYS 登录保持天数，默认 30；期间每天首次访问会自动续期
@@ -78,6 +80,27 @@ def _parse_proxies(v):
 
 
 TRUSTED_PROXIES = _parse_proxies(os.environ.get("VT_TRUSTED_PROXIES", "127.0.0.1,::1"))
+
+
+def _load_agent_pin():
+    """Agent 从 GitHub 固定提交安装：仓库、40 位提交哈希、install.sh 的 SHA256"""
+    pin = {}
+    try:
+        with open(os.path.join(BASE, "agent_pin.json"), encoding="utf-8") as f:
+            pin = json.load(f)
+    except (OSError, ValueError) as e:
+        print(f"[warn] 读取 agent_pin.json 失败：{e}")
+    repo = os.environ.get("VT_AGENT_REPO") or pin.get("repo", "")
+    commit = (os.environ.get("VT_AGENT_COMMIT") or pin.get("commit", "")).lower()
+    sha = (os.environ.get("VT_AGENT_INSTALL_SHA256") or pin.get("install_sha256", "")).lower()
+    if not (re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or "")
+            and re.fullmatch(r"[0-9a-f]{40}", commit) and re.fullmatch(r"[0-9a-f]{64}", sha)):
+        print("[warn] Agent 固定版本无效，面板不会生成安装命令（检查 agent_pin.json）")
+        return None
+    return {"repo": repo, "commit": commit, "install_sha256": sha}
+
+
+AGENT_PIN = _load_agent_pin()
 DEFAULT_INTERVAL = 3            # 有人在看面板时的上报/刷新间隔（秒）
 DEFAULT_IDLE = 60               # 没人看面板时的上报间隔（秒），省流量
 VIEW_ACTIVE_SEC = 90            # 最近这么久内有人访问面板，就算“有人在看”
@@ -992,9 +1015,7 @@ def check_session(val):
 
 FLAG_RE = re.compile(r"^/flags/([a-z]{2})\.png$")
 
-STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
-          "/agent.sh": ("agent.sh", "text/plain; charset=utf-8"),
-          "/install.sh": ("install.sh", "text/plain; charset=utf-8")}
+STATIC = {"/": ("index.html", "text/html; charset=utf-8")}   # Agent 脚本改从 GitHub 固定提交下载
 
 ROUTE_SRV = re.compile(r"^/api/servers/(\d+)(?:/(daily|hourly|cycles|reset|token|metrics))?$")
 
@@ -1221,7 +1242,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "telegram": bool(TG_TOKEN and TG_CHAT),
                                         "session_days": SESSION_TTL // 86400,
                                         "interval": REPORT_INTERVAL, "idle_interval": IDLE_INTERVAL,
-                                        "site_name": get_site_name()})
+                                        "site_name": get_site_name(), "agent": AGENT_PIN})
         if path == "/api/settings" and method == "POST":
             b = self.read_json()
             set_intervals(b.get("interval"), b.get("idle_interval"))

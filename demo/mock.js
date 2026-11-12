@@ -209,7 +209,7 @@ const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.no
       return R(200, {start: iso(start), end: iso(end - D), servers, rx: servers.reduce((a, x) => a + x.rx, 0), tx: servers.reduce((a, x) => a + x.tx, 0)});
     }
     if (path === "/api/password") return R(400, {error: "演示站不能修改密码"});
-    if (path === "/api/meta") return R(200, {tz: "Asia/Shanghai", now, base_url: "https://traffic.example.com", telegram: true, session_days: 30, interval: IV.interval, idle_interval: IV.idle_interval, site_name: IV.site_name});
+    if (path === "/api/meta") return R(200, {tz: "Asia/Shanghai", now, base_url: "https://traffic.example.com", telegram: true, session_days: 30, interval: IV.interval, idle_interval: IV.idle_interval, site_name: IV.site_name, agent: {repo: "Ronin52658/vps-traffic", commit: "0123456789abcdef0123456789abcdef01234567", install_sha256: "0".repeat(64)}});
     if (path === "/api/order" && method === "POST") {
       const ids = body.ids || [];
       S.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));

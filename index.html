@@ -824,9 +824,16 @@ function bindForm(onSubmit) {
   };
 }
 
+// Agent 从 GitHub 固定提交安装：先下载 install.sh 并校验 SHA256，通过才运行；install.sh 再校验 agent.sh
 function installCmd(token) {
-  const b = META.base_url;
-  return `curl -fsSL ${b}/install.sh | sh -s -- --server ${b} --token ${token} --interval ${META.interval || 3}`;
+  const b = META.base_url, a = META.agent;
+  if (!a) return "# 面板没有配置 Agent 固定版本（agent_pin.json），无法生成安装命令";
+  const f = "/root/vps-traffic-install.sh";
+  return [
+    `curl -fsSL --proto '=https' -o ${f} https://raw.githubusercontent.com/${a.repo}/${a.commit}/install.sh`,
+    `echo "${a.install_sha256}  ${f}" | sha256sum -c - && sh ${f} --ref ${a.commit} --server ${b} --token ${token} --interval ${META.interval || 3}`,
+    `rm -f ${f}`,
+  ].join("\n");
 }
 // navigator.clipboard 只在 HTTPS 或 localhost 下可用；用 IP:端口 访问时退回到 execCommand
 function copyText(t) {
@@ -863,7 +870,7 @@ function tabSettings(s) {
         <button class="btn" id="copyBtn">复制命令</button>
         <button class="btn" id="tokenBtn">重新生成 Token</button>
       </div>
-      <p class="hint" style="margin-top:10px">默认自动检测默认路由网卡；要指定网卡可在命令后加 <code>--iface eth0</code>。</p>
+      <p class="hint" style="margin-top:10px">脚本从 GitHub 固定提交 <code>${esc((META.agent && META.agent.commit || "").slice(0, 7))}</code> 下载，install.sh 和 agent.sh 都会先校验 SHA256，不一致就中止。默认自动检测默认路由网卡；要指定网卡可在第二行末尾加 <code>--iface eth0</code>。</p>
     </div>
     <div class="card">
       <h3>危险操作</h3>

@@ -9,7 +9,9 @@ Agent 读取网卡计数和系统状态（CPU、负载、内存、Swap、硬盘�
 | server.py | 面板服务端，只用 Python 标准库（3.9+），数据存 SQLite |
 | index.html | 网页界面，由 server.py 直接提供 |
 | agent.sh | 被监控 VPS 上运行的 Agent（sh + awk + curl/wget） |
-| install.sh | Agent 一键安装/卸载，由面板提供下载 |
+| install.sh | Agent 一键安装/卸载，从 GitHub 固定提交下载，内含 agent.sh 的 SHA256 |
+| agent_pin.json | 面板生成安装命令用的固定版本：仓库、提交、install.sh 的 SHA256 |
+| tools/pin_agent.sh | 更新 agent.sh 哈希、切换固定提交、检查 GitHub 上的文件 |
 | install_panel.sh | 面板一键部署 |
 | flags/ | 国旗图片（Noto Color Emoji，Apache 2.0），由面板提供 |
 | vps-traffic-panel.service | 面板的 systemd 模板（install_panel.sh 会用到） |
@@ -17,12 +19,14 @@ Agent 读取网卡计数和系统状态（CPU、负载、内存、Swap、硬盘�
 
 ## 部署面板
 
-把整个目录传到面板机器上，以 root 运行：
+在面板机器上以 root 运行：
 
 ```sh
-unzip vps-traffic.zip && cd vps-traffic
+git clone https://github.com/Ronin52658/vps-traffic.git && cd vps-traffic
 sh install_panel.sh --port 8080
 ```
+
+升级：`cd vps-traffic && git pull && sh install_panel.sh`。
 
 结束后会打印访问地址 `http://公网IP:8080` 和随机生成的登录密码。也可以用 `--password 你的密码` 自己指定（至少 8 位）。
 
@@ -32,7 +36,7 @@ sh install_panel.sh --port 8080
 
 ## 登录与安全
 
-- 所有页面数据和接口都需要登录；只有 `/install.sh`、`/agent.sh`（安装脚本，不含任何密钥）和 Agent 上报接口（靠 Token 认证）不需要。
+- 所有页面数据和接口都需要登录；只有 Agent 上报接口（靠 Token 认证）不需要。Agent 安装脚本不再由面板提供，改从 GitHub 下载。
 - 密码只以 PBKDF2 哈希保存。同一 IP 连续输错 5 次锁定 15 分钟。
 - 登录后在该浏览器保持 30 天，期间有访问会自动续期，关闭浏览器再打开不用重新输入密码。天数可用 `VT_SESSION_DAYS` 调整。
 - 新增服务器、首页排序、面板名称、修改密码、备份还原、退出登录都在首页右上角的“设置”里。
@@ -61,17 +65,32 @@ sh install_panel.sh --port 8080
    然后 `systemctl daemon-reload && systemctl restart vps-traffic-panel`。不设置的话，所有访客和 Agent 在面板看来都来自 Docker 的地址，登录限流、IP 显示和国旗识别都会出错。
 3. 用域名登录面板，新增服务器时生成的安装命令会自动变成 `https://域名`。已安装的 Agent 想改走 HTTPS，在 VPS 上重新运行一次新的安装命令即可（Token 不变）。
 
-改走域名 HTTPS 后，安装命令和 Agent 上报都经过加密，安装时被中间人替换脚本的风险也一并消除。
+改走域名 HTTPS 后，Agent 上报也经过加密。（安装脚本本身从 GitHub 经 HTTPS 下载并校验 SHA256，与面板是否 HTTPS 无关。）
 
 ## 加入 VPS
 
-面板点“新增服务器”，复制生成的命令在 VPS 上以 root 运行：
+面板点“新增服务器”，复制生成的命令在 VPS 上以 root 运行（三行一起粘贴）：
 
 ```sh
-curl -fsSL http://面板IP:8080/install.sh | sh -s -- --server http://面板IP:8080 --token <TOKEN>
+curl -fsSL --proto '=https' -o /root/vps-traffic-install.sh https://raw.githubusercontent.com/Ronin52658/vps-traffic/<提交>/install.sh
+echo "<install.sh 的 SHA256>  /root/vps-traffic-install.sh" | sha256sum -c - && sh /root/vps-traffic-install.sh --ref <提交> --server http://面板IP:8080 --token <TOKEN> --interval 3
+rm -f /root/vps-traffic-install.sh
 ```
 
-可选参数：`--iface eth0` 指定网卡（默认自动检测默认路由），`--interval 3` 初始上报间隔（秒）。
+- 脚本固定在 `agent_pin.json` 指定的提交，不跟随分支变化；仓库之后再改，已生成的命令装出来的仍是同一份代码。
+- 两层校验：命令先校验 install.sh 的 SHA256（来自面板的 `agent_pin.json`），install.sh 再校验 agent.sh 的 SHA256（写在 install.sh 里），任何一层不一致都中止，不会改动 VPS。
+- 可选参数加在第二行末尾：`--iface eth0` 指定网卡（默认自动检测默认路由），`--interval 3` 初始上报间隔（秒）。
+
+### 发布新版 Agent
+
+1. 修改 `agent.sh` 或 `install.sh`；改过 agent.sh 的话运行 `sh tools/pin_agent.sh hash`，把新哈希写进 install.sh
+2. 提交并推送到 GitHub
+3. `sh tools/pin_agent.sh pin <刚才的提交>` 更新 `agent_pin.json`，再提交推送
+4. `sh tools/pin_agent.sh check` 确认 GitHub 上的文件可下载且哈希一致
+5. 面板机器上拉取新代码，重新运行 `sh install_panel.sh`；之后生成的安装命令就会用新提交
+
+合并 PR 时请用 “Create a merge commit”，保留原提交哈希（squash / rebase 会产生新哈希，旧的固定提交虽然仍可通过 PR 访问，但最好重新 pin 到 main 上的提交）。
+也可以不改文件，用 `VT_AGENT_REPO`、`VT_AGENT_COMMIT`、`VT_AGENT_INSTALL_SHA256` 环境变量覆盖（写在面板的 systemd 服务里）。
 
 ### 刷新间隔
 
@@ -83,7 +102,7 @@ curl -fsSL http://面板IP:8080/install.sh | sh -s -- --server http://面板IP:8
 每次上报（含系统信息）连同 TCP 握手约 1.3 KB。一直按 3 秒上报每台每月约 1.1 GB；按 60 秒约 55 MB。所以空闲时放慢很重要。
 
 旧版 Agent 不认识面板下发的间隔，需要在每台 VPS 上重新运行一次面板里的安装命令（Token 不变，数据不受影响）。
-卸载：`curl -fsSL http://面板IP:8080/install.sh | sh -s -- --uninstall`
+卸载：把安装命令第二行末尾的参数换成 `--uninstall`（即 `sh /root/vps-traffic-install.sh --uninstall`），其余不变。
 
 ## Agent 的权限
 
