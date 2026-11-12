@@ -696,6 +696,8 @@ def handle_report(token, body, ip=""):
     host = str(body.get("hostname", ""))[:64]
     now = int(time.time())
     hour = now - now % 3600
+    if not TOKEN_RE.fullmatch(token or ""):
+        return 401, {"error": "invalid token"}
     with txn() as conn:
         srv = conn.execute("SELECT * FROM servers WHERE token=?", (token,)).fetchone()
         if srv is None:
@@ -797,11 +799,18 @@ def metrics_series(conn, sid, rng, now):
     return [{"ts": r["b"], **{k: r[k] for k in r.keys() if k != "b"}} for r in rows]
 
 
+def _parse_day(v):
+    d = date.fromisoformat(v)
+    if not 2000 <= d.year <= 2200:
+        raise ValueError("日期超出范围")
+    return d
+
+
 def parse_range(qs, now):
     """start/end 为 YYYY-MM-DD（含首尾两天）；没给时用 days 往回推"""
     if qs.get("start") and qs.get("end"):
-        start_d = date.fromisoformat(qs["start"][0])
-        end_d = date.fromisoformat(qs["end"][0])
+        start_d = _parse_day(qs["start"][0])
+        end_d = _parse_day(qs["end"][0])
         if end_d < start_d:
             raise ValueError("结束日期不能早于开始日期")
         if (end_d - start_d).days + 1 > MAX_RANGE_DAYS:
@@ -844,7 +853,7 @@ def daily_stats(conn, sid, start_d, end_d):
 
 
 def hourly_stats(conn, sid, day_str):
-    d = date.fromisoformat(day_str)
+    d = _parse_day(day_str)
     t0 = local_midnight(d)
     t1 = local_midnight(d + timedelta(days=1))
     rows = conn.execute("SELECT ts, rx, tx FROM traffic_hourly WHERE server_id=? AND ts>=? AND ts<?",
@@ -904,7 +913,7 @@ def clean_server_input(b, partial=False):
     if "anchor" in b:
         a = b.get("anchor") or None
         if a:
-            date.fromisoformat(a)
+            a = _parse_day(str(a)).isoformat()
         out["anchor"] = a
     return out
 
@@ -1021,6 +1030,83 @@ def validate_backup(path):
         c.close()
 
 
+TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,128}")
+
+
+def _int_in(v, lo, hi, default):
+    return v if type(v) is int and lo <= v <= hi else default
+
+
+def _iso_or_none(v):
+    try:
+        return date.fromisoformat(v).isoformat() if isinstance(v, str) and len(v) == 10 else None
+    except ValueError:
+        return None
+
+
+def _ip_or_empty(v):
+    try:
+        return str(ipaddress.ip_address(v)) if isinstance(v, str) and v else ""
+    except ValueError:
+        return ""
+
+
+def _json_clean(v, parser):
+    try:
+        d = parser(json.loads(v)) if isinstance(v, str) and v else None
+    except (ValueError, TypeError):
+        d = None
+    return json.dumps(d, ensure_ascii=False) if d else ""
+
+
+def normalize_restored(conn):
+    """备份文件可能被人改过：还原后把每个字段都校验/修正一遍，
+    防止异常类型让页面崩溃，或把 HTML 塞进页面（存储型 XSS）"""
+    now = int(time.time())
+    seen_tokens = set()
+    for r in conn.execute("SELECT * FROM servers").fetchall():
+        token = r["token"] if isinstance(r["token"], str) and TOKEN_RE.fullmatch(r["token"]) else ""
+        if not token or token in seen_tokens:
+            token = secrets.token_urlsafe(24)           # 格式不对或重复：换新的（该机需重装 Agent）
+        seen_tokens.add(token)
+        q = r["quota_gb"]
+        q = float(q) if type(q) in (int, float) and 0 <= q <= MAX_QUOTA_GB else 0.0
+        txt = lambda v, n: re.sub(r"[\x00-\x1f]", "", v)[:n] if isinstance(v, str) else ""
+        num = lambda v: float(v) if type(v) in (int, float) and 0 <= v < 1e15 else 0.0
+        cc = lambda v: v if isinstance(v, str) and re.fullmatch(r"[A-Z]{2}", v) else ""
+        name = txt(r["name"], 64).strip() or f"server-{r['id']}"
+        conn.execute("""UPDATE servers SET name=?, note=?, token=?, quota_gb=?, billing=?, reset_type=?, reset_day=?,
+                          interval_days=?, anchor=?, sort=?, created_at=?, last_seen=?, rate_rx=?, rate_tx=?, iface=?,
+                          hostname=?, metrics=?, sysinfo=?, public_ip=?, country=?, geo_ip=?, geo_country=? WHERE id=?""",
+                     (name, txt(r["note"], 200), token, q,
+                      r["billing"] if r["billing"] in VALID_BILLING else "sum",
+                      r["reset_type"] if r["reset_type"] in VALID_RESET else "monthly",
+                      _int_in(r["reset_day"], 1, 31, 1), _int_in(r["interval_days"], 1, 3650, 30),
+                      _iso_or_none(r["anchor"]), _int_in(r["sort"], 0, 2 ** 62, 0),
+                      _int_in(r["created_at"], 0, 2 ** 40, now), _int_in(r["last_seen"], 0, 2 ** 40, 0),
+                      num(r["rate_rx"]), num(r["rate_tx"]), txt(r["iface"], 32), txt(r["hostname"], 64),
+                      _json_clean(r["metrics"], parse_sys), _json_clean(r["sysinfo"], parse_info),
+                      _ip_or_empty(r["public_ip"]), cc(r["country"]), _ip_or_empty(r["geo_ip"]), cc(r["geo_country"]),
+                      r["id"]))
+    # 周期：数值列必须是整数，计费方式/原因/告警等级必须是已知值
+    conn.execute("""DELETE FROM cycles WHERE typeof(server_id)!='integer' OR server_id NOT IN (SELECT id FROM servers)
+                      OR typeof(start_ts)!='integer' OR typeof(rx)!='integer' OR typeof(tx)!='integer' OR rx<0 OR tx<0
+                      OR typeof(end_ts) NOT IN ('integer','null') OR typeof(closed_at) NOT IN ('integer','null')""")
+    conn.execute("UPDATE cycles SET quota_gb=0 WHERE typeof(quota_gb) NOT IN ('integer','real') OR NOT (quota_gb BETWEEN 0 AND ?)",
+                 (MAX_QUOTA_GB,))
+    conn.execute("UPDATE cycles SET billing='sum' WHERE billing NOT IN ('sum','out','in','max')")
+    conn.execute("UPDATE cycles SET closed=CASE WHEN closed=1 THEN 1 ELSE 0 END")
+    conn.execute("UPDATE cycles SET closed_reason='manual' WHERE closed_reason IS NOT NULL AND closed_reason NOT IN ('auto','manual')")
+    conn.execute("UPDATE cycles SET alert_level=0 WHERE alert_level NOT IN (0,80,95,100)")
+    conn.execute("""DELETE FROM traffic_hourly WHERE typeof(server_id)!='integer' OR server_id NOT IN (SELECT id FROM servers)
+                      OR typeof(ts)!='integer' OR typeof(rx)!='integer' OR typeof(tx)!='integer' OR rx<0 OR tx<0""")
+    cols = ("cpu_sum", "load1", "mem_used", "mem_total", "swap_used", "swap_total", "disk_used", "disk_total",
+            "tcp", "udp", "procs", "rx", "tx", "n")
+    bad = " OR ".join(f"typeof({c}) NOT IN ('integer','real','null')" for c in cols)
+    conn.execute(f"""DELETE FROM metrics_minute WHERE typeof(server_id)!='integer'
+                      OR server_id NOT IN (SELECT id FROM servers) OR typeof(ts)!='integer' OR {bad}""")
+
+
 def prune_safety_copies():
     d = os.path.dirname(DB_PATH) or "."
     base = os.path.basename(DB_PATH) + ".before-restore-"
@@ -1053,6 +1139,7 @@ def restore_backup(upload_path):
                     "SELECT name, type FROM sqlite_master WHERE type IN ('trigger','view')").fetchall():
                 live.execute(f'DROP {kind.upper()} IF EXISTS "{name.replace(chr(34), chr(34) * 2)}"')
             migrate(live)                       # 旧版本备份缺的表、字段或索引补上
+            normalize_restored(live)            # 逐字段校验，被改过的备份也不能塞进异常数据或 HTML
             # 只保留可以从备份恢复的普通设置；密码、会话密钥、登录白名单沿用当前面板
             ph = ",".join("?" * len(RESTORABLE_SETTINGS))
             live.execute(f"DELETE FROM settings WHERE k NOT IN ({ph})", RESTORABLE_SETTINGS)

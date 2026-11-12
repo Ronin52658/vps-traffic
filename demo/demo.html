@@ -631,8 +631,8 @@ function fdc(ts) { const t = fd(ts, true); return t.endsWith("00:00") ? t.slice(
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.style.display = "block"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 2400); }
 function ruleText(s) {
-  if (s.reset_type === "monthly") return `每月 ${s.reset_day} 日重置`;
-  if (s.reset_type === "interval") return `每 ${s.interval_days} 天重置（自 ${s.anchor} 起）`;
+  if (s.reset_type === "monthly") return `每月 ${+s.reset_day || 1} 日重置`;
+  if (s.reset_type === "interval") return `每 ${+s.interval_days || 30} 天重置（自 ${esc(s.anchor)} 起）`;
   return "手动重置";
 }
 
@@ -671,7 +671,7 @@ function meter(s) {
   return `
     ${quota > 0 ? `<div class="meter${pct >= 100 ? " over" : ""}"><div class="fill">${fills}</div>${ticks}${knob}</div>` : `<div style="height:12px"></div>`}
     <div class="meta num">
-      <span><span class="used">${fb(c.used)}</span>${quota > 0 ? ` / ${s.quota_gb} GB（<span class="${hot ? "pace-hot" : ""}">${pct.toFixed(1)}%</span>）` : "（未设额度）"}</span>
+      <span><span class="used">${fb(c.used)}</span>${quota > 0 ? ` / ${+s.quota_gb} GB（<span class="${hot ? "pace-hot" : ""}">${pct.toFixed(1)}%</span>）` : "（未设额度）"}</span>
       <span>${daysLeft !== null ? `${daysLeft} 天后重置（${fd(c.end)}）` : "手动重置"}</span>
     </div>`;
 }
@@ -735,7 +735,7 @@ function card(s) {
         ${resCell("内存", memP, "", y ? `${fb(y.mem_used)} / ${fb(y.mem_total)}` : "—")}
         ${resCell("硬盘", diskP, "", y ? `${fb(y.disk_used)} / ${fb(y.disk_total)}` : "—")}
         <div><div class="k"><span class="lbl">流量</span><b class="${k.hot ? "pace-hot" : ""}">${k.pct == null ? "∞" : k.pct.toFixed(1) + "%"}</b></div>
-          ${trafficBar}<div class="v">${fb(k.c.used)} / ${k.quota > 0 ? s.quota_gb + " GB" : "∞"}</div></div>
+          ${trafficBar}<div class="v">${fb(k.c.used)} / ${k.quota > 0 ? +s.quota_gb + " GB" : "∞"}</div></div>
       </div>
       <div class="trio num">
         <div class="well"><small>实时网速</small><span class="r">↓ ${s.online ? fr(s.rate_rx) : "—"}</span><br><span class="t">↑ ${s.online ? fr(s.rate_tx) : "—"}</span></div>
@@ -1110,10 +1110,10 @@ function serverForm(s = {}) {
   <form id="srvForm">
     <div class="grid2">
       <label>名称<input name="name" required maxlength="64" value="${esc(s.name || "")}" placeholder="例如 HK-NAT-01"></label>
-      <label>地区代码（留空按 IP 自动识别）<input name="country" maxlength="2" value="${esc(s.country_manual || "")}" placeholder="${s.country_auto ? `自动识别：${s.country_auto}` : "例如 SG、HK、US"}" style="text-transform:uppercase"></label>
+      <label>地区代码（留空按 IP 自动识别）<input name="country" maxlength="2" value="${esc(s.country_manual || "")}" placeholder="${s.country_auto ? `自动识别：${esc(s.country_auto)}` : "例如 SG、HK、US"}" style="text-transform:uppercase"></label>
     </div>
     <div class="grid2">
-      <label>每周期额度（GB，0 为不限）<input name="quota_gb" type="number" min="0" step="any" value="${s.quota_gb ?? 1000}"></label>
+      <label>每周期额度（GB，0 为不限）<input name="quota_gb" type="number" min="0" step="any" value="${s.quota_gb != null ? +s.quota_gb : 1000}"></label>
       <label>计费方式<select name="billing">${Object.entries(BILLING).map(([k, v]) => `<option value="${k}" ${s.billing === k ? "selected" : ""}>${v}</option>`).join("")}</select></label>
     </div>
     <label>重置方式<select name="reset_type">
@@ -1122,11 +1122,11 @@ function serverForm(s = {}) {
       <option value="manual" ${t === "manual" ? "selected" : ""}>仅手动重置</option>
     </select></label>
     <div class="grid2" data-for="monthly">
-      <label>每月几号（1–31）<input name="reset_day" type="number" min="1" max="31" value="${s.reset_day || 1}"></label>
+      <label>每月几号（1–31）<input name="reset_day" type="number" min="1" max="31" value="${+s.reset_day || 1}"></label>
       <p class="hint" style="align-self:end">遇到小月会在当月最后一天重置。</p>
     </div>
     <div class="grid2" data-for="interval">
-      <label>间隔天数<input name="interval_days" type="number" min="1" max="3650" value="${s.interval_days || 30}"></label>
+      <label>间隔天数<input name="interval_days" type="number" min="1" max="3650" value="${+s.interval_days || 30}"></label>
       <label>起算日期<input name="anchor" type="date" value="${s.anchor || ""}"></label>
     </div>
     <p class="err" id="formErr"></p>

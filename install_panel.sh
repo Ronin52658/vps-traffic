@@ -73,6 +73,8 @@ else
 fi
 printf '%s' "${PUBLIC_URL#https://}" | grep -Eq '^[A-Za-z0-9.-]+(:[0-9]{1,5})?$' || { echo "域名格式不对：$PUBLIC_URL"; exit 1; }
 printf '%s' "$PROXIES" | grep -Eq '^[0-9A-Fa-f.:/,]+$' || { echo "--proxy 格式不对：$PROXIES"; exit 1; }
+printf '%s' "$TZNAME" | grep -Eq '^[A-Za-z0-9_+/-]{1,64}$' || { echo "--tz 格式不对：$TZNAME"; exit 1; }
+printf '%s' "$PORT" | grep -Eq '^[0-9]{1,5}$' || { echo "--port 须为数字"; exit 1; }
 printf '%s' "$LISTEN" | grep -Eq '^[0-9A-Fa-f.:]+$' || { echo "--listen 格式不对：$LISTEN"; exit 1; }
 
 # 专用系统用户：没有 shell、没有家目录
