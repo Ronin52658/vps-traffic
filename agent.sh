@@ -21,7 +21,12 @@ mkdir -p "$STATE_DIR" 2>/dev/null
 detect_iface() {
   i=$(ip route show default 2>/dev/null | awk '{for(n=1;n<NF;n++) if($n=="dev"){print $(n+1); exit}}')
   [ -z "$i" ] && i=$(ip -6 route show default 2>/dev/null | awk '{for(n=1;n<NF;n++) if($n=="dev"){print $(n+1); exit}}')
-  [ -z "$i" ] && i=$(awk 'NR>2{l=$0; sub(/^[ \t]+/,"",l); n=substr(l,1,index(l,":")-1); if(n!="lo"){print n; exit}}' /proc/net/dev)
+  # 没有 ip 命令（精简系统/容器）时，直接读内核路由表找默认路由网卡
+  [ -z "$i" ] && i=$(awk 'NR>1 && $2=="00000000" && $8=="00000000"{print $1; exit}' /proc/net/route 2>/dev/null)
+  [ -z "$i" ] && i=$(awk '$1=="00000000000000000000000000000000" && $2=="00" && $10!="lo"{print $10; exit}' /proc/net/ipv6_route 2>/dev/null)
+  # 仍然找不到：取流量最大的非 lo 网卡（不再取第一张，第一张常是 ifb0、docker0 之类的虚拟网卡）
+  [ -z "$i" ] && i=$(awk 'NR>2{l=$0; sub(/^[ \t]+/,"",l); p=index(l,":"); n=substr(l,1,p-1); split(substr(l,p+1),f," ");
+    if(n!="lo" && f[1]+f[9]>=best){best=f[1]+f[9]; b=n}} END{print b}' /proc/net/dev)
   echo "$i"
 }
 
