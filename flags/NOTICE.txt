@@ -1,0 +1,2 @@
+国旗图片取自 Google Noto Color Emoji（https://github.com/googlefonts/noto-emoji），
+图片部分依 Apache License 2.0 授权，字体依 SIL Open Font License 1.1 授权。

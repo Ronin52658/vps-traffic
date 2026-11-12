@@ -1,0 +1,8 @@
+# 运行时数据（含 Token 和密码哈希），不要提交
+traffic.db
+traffic.db-*
+traffic.db.before-restore-*
+*.db
+__pycache__/
+*.pyc
+.DS_Store

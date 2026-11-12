@@ -1,0 +1,154 @@
+# VPS 流量监控面板
+
+Agent 读取网卡计数和系统状态（CPU、负载、内存、Swap、硬盘、连接数、进程、运行时间，以及系统版本、内核、CPU 型号、虚拟化等配置信息）并推送到面板。有人打开面板时按“实时间隔”（默认 3 秒）上报、页面同步刷新；没人看时自动放慢到“空闲间隔”（默认 60 秒）省流量；面板按自定义周期累计流量，重置时保留历史周期。部署后用 `http://公网IP:端口` 直接访问，需要密码登录。
+
+## 文件
+
+| 文件 | 用途 |
+|---|---|
+| server.py | 面板服务端，只用 Python 标准库（3.9+），数据存 SQLite |
+| index.html | 网页界面，由 server.py 直接提供 |
+| agent.sh | 被监控 VPS 上运行的 Agent（sh + awk + curl/wget） |
+| install.sh | Agent 一键安装/卸载，由面板提供下载 |
+| install_panel.sh | 面板一键部署 |
+| flags/ | 国旗图片（Noto Color Emoji，Apache 2.0），由面板提供 |
+| vps-traffic-panel.service | 面板的 systemd 模板（install_panel.sh 会用到） |
+| demo/ | 演示站：mock.js 模拟后端，build_demo.py 从 index.html 生成 demo.html |
+
+## 部署面板
+
+把整个目录传到面板机器上，以 root 运行：
+
+```sh
+unzip vps-traffic.zip && cd vps-traffic
+sh install_panel.sh --port 8080
+```
+
+结束后会打印访问地址 `http://公网IP:8080` 和随机生成的登录密码。也可以用 `--password 你的密码` 自己指定（至少 8 位）。
+
+打不开的话，在系统防火墙和云厂商安全组放行该 TCP 端口。
+
+重新运行 `install_panel.sh` 即可升级，数据库、密码、端口、时区、反代和 Telegram 设置都会保留。从旧版（root 运行、数据库在 `/opt/vps-traffic-panel`）升级时，数据库会自动搬到 `/var/lib/vps-traffic-panel`。卸载：`sh install_panel.sh --uninstall`（数据库保留）。
+
+## 登录与安全
+
+- 所有页面数据和接口都需要登录；只有 `/install.sh`、`/agent.sh`（安装脚本，不含任何密钥）和 Agent 上报接口（靠 Token 认证）不需要。
+- 密码只以 PBKDF2 哈希保存。同一 IP 连续输错 5 次锁定 15 分钟。
+- 登录后在该浏览器保持 30 天，期间有访问会自动续期，关闭浏览器再打开不用重新输入密码。天数可用 `VT_SESSION_DAYS` 调整。
+- 新增服务器、首页排序、面板名称、修改密码、备份还原、退出登录都在首页右上角的“设置”里。
+- 复制命令：用 `http://IP:端口` 访问时浏览器不开放剪贴板接口，面板会自动改用兼容方式复制；仍然失败时会帮你选中命令，手动复制即可。
+- 在面板“设置”里修改密码，改完后其他设备的登录会失效。
+- 忘记密码：在解压目录里运行 `sh install_panel.sh --password 新密码`（至少 8 位）。
+- 登录限流两层：同一 IP 连续输错 5 次锁 15 分钟；所有 IP 合计 10 分钟内失败 30 次，暂停陌生 IP 登录 15 分钟。最近 30 天成功登录过的 IP 不受全局暂停影响，攻击者没法借此把你锁在门外。
+- 用 IP:端口直接访问时走的是 HTTP，密码和 Token 是明文传输。加 HTTPS 见下面“用 Nginx Proxy Manager 反代”。
+
+## 面板的权限
+
+面板以专用系统用户 `vps-traffic`（无 shell、无家目录）运行，不是 root，并放在只读沙箱里：
+
+- 程序文件在 `/opt/vps-traffic-panel`，属于 root，面板只能读
+- 唯一可写的是数据目录 `/var/lib/vps-traffic-panel`（数据库、备份临时文件、还原前的安全副本）
+- 不能提权，只保留绑定 1024 以下端口的能力；看不到其他进程；系统调用限制在普通服务范围内
+- 可以用 `systemd-analyze security vps-traffic-panel` 查看沙箱评分
+
+## 用 Nginx Proxy Manager 反代（HTTPS）
+
+加 HTTPS 后 `http://IP:端口` 仍然可以访问，两者同时存在；想只走域名，再用防火墙关掉这个端口即可。
+
+1. NPM 里新增 Proxy Host：域名指向面板机器，Forward 填 `http` + 面板机器的 IP + 端口 8080（NPM 和面板在同一台时，填这台机器的公网 IP 就行，也可以填 Docker 网桥网关地址，用 `docker network inspect` 查看），SSL 申请 Let's Encrypt 证书并开启 Force SSL。
+2. 让面板信任 NPM 转发的真实 IP。编辑 `/etc/systemd/system/vps-traffic-panel.service`，取消这一行的注释：
+   `Environment=VT_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12`
+   然后 `systemctl daemon-reload && systemctl restart vps-traffic-panel`。不设置的话，所有访客和 Agent 在面板看来都来自 Docker 的地址，登录限流、IP 显示和国旗识别都会出错。
+3. 用域名登录面板，新增服务器时生成的安装命令会自动变成 `https://域名`。已安装的 Agent 想改走 HTTPS，在 VPS 上重新运行一次新的安装命令即可（Token 不变）。
+
+改走域名 HTTPS 后，安装命令和 Agent 上报都经过加密，安装时被中间人替换脚本的风险也一并消除。
+
+## 加入 VPS
+
+面板点“新增服务器”，复制生成的命令在 VPS 上以 root 运行：
+
+```sh
+curl -fsSL http://面板IP:8080/install.sh | sh -s -- --server http://面板IP:8080 --token <TOKEN>
+```
+
+可选参数：`--iface eth0` 指定网卡（默认自动检测默认路由），`--interval 3` 初始上报间隔（秒）。
+
+### 刷新间隔
+
+在“设置”→“刷新间隔”里设置两个值，Agent 每次上报后会按面板的回应自动调整，不需要登录 VPS 修改：
+
+- 实时间隔（默认 3 秒）：最近 90 秒内有人在用面板时使用，页面也按这个间隔刷新
+- 空闲间隔（默认 60 秒）：没人看时使用。打开面板后，最多要等一个空闲间隔，网速才切到实时
+
+每次上报（含系统信息）连同 TCP 握手约 1.3 KB。一直按 3 秒上报每台每月约 1.1 GB；按 60 秒约 55 MB。所以空闲时放慢很重要。
+
+旧版 Agent 不认识面板下发的间隔，需要在每台 VPS 上重新运行一次面板里的安装命令（Token 不变，数据不受影响）。
+卸载：`curl -fsSL http://面板IP:8080/install.sh | sh -s -- --uninstall`
+
+## Agent 的权限
+
+Agent 由 systemd 以临时普通用户（`DynamicUser`）运行，不是 root，并放在只读沙箱里：
+
+- 整个系统只读，`/home` 不可见，只有自己的状态目录 `/var/lib/private/vps-traffic` 可写
+- 不能提权、没有任何 capability、不能加载内核模块、不能改系统时间和主机名
+- 只能使用 IPv4/IPv6、本地 socket 和读路由表，系统调用限制在普通服务的范围内
+- 配置文件 `/etc/vps-traffic/agent.conf`（含 Token）只有 root 能读，由 systemd 读取后以环境变量交给 Agent
+
+可以用 `systemd-analyze security vps-traffic-agent` 查看沙箱评分。
+
+已知影响：如果系统给 `/proc` 开启了 `hidepid`，进程数只会统计到 Agent 自己；少数容器里“虚拟化”一栏可能为空。其余功能不受影响。
+
+从旧版（root 运行）升级：在 VPS 上重新运行一次面板里的安装命令即可，安装脚本会清理旧的状态目录（只损失几秒的计数）。
+
+## 重置规则
+
+- 每月固定日：例如 31 号，小月自动改在当月最后一天
+- 每隔 N 天：从起算日期开始每 N 天一轮
+- 仅手动重置：周期不会自动结束
+
+所有重置点以 `VT_TZ` 时区（默认 Asia/Shanghai）的 0 点计算。修改规则时，当前周期起点不变，按新规则重算结束时间。
+
+## 计费方式
+
+双向相加、仅上行、仅下行、取较大方向。额度百分比、告警与用量条都按计费方式计算。
+
+## 服务器配置与系统监控
+
+- 首页卡片：在线时长、系统版本、核心数、CPU（含负载）、内存、硬盘、流量周期用量，以及实时网速和本周期累计。顶部汇总在线数、实时总网速、今日流量、内存和硬盘总用量。
+- 详情页“监控”分页：系统信息（系统、内核、CPU 型号、架构/虚拟化、IP、运行时间、主机名、网卡）、当前状态，以及 CPU、负载、内存与 Swap、硬盘、网络速率、网络连接、进程七张折线图；可选实时、1 小时、6 小时、24 小时、7 天。
+- IP 取的是面板看到的上报来源地址；NAT 机显示的是它的出口 IP。
+- 国旗：面板第一次看到某台机器的 IP 时，会向 ipinfo.io（失败时改用 ip-api.com）查一次国家，结果存库，之后不再重复查询。查询由面板服务器发出，只发送该 IP。也可以在服务器设置里手动填两位国家代码覆盖自动结果。国旗是图片（`flags/` 目录，取自 Noto Color Emoji），Windows 上也能正常显示。
+- 不显示价格和到期时间。
+- 监控数据按分钟保存 7 天；“实时”用面板内存里最近约 240 次上报。
+- Agent 只读取 /proc、df 等本机信息，不监听端口，也不执行任何来自面板的命令。
+- 旧版 Agent 不会上报系统信息，需要在 VPS 上重新运行一次面板里的安装命令（Token 不变）。
+
+## 区间查询
+
+- 单台服务器：详情页“区间查询”，选开始和结束日期（例如 10-23 至 12-26），显示下行、上行、合计、计费用量和每日柱状图。快捷按钮有本周期、上个周期、近 7 天、近 30 天、本月、上月。
+- 全部服务器：首页“区间统计”，列出每台在这段时间的流量和合计，点某一行可跳到该服务器的区间明细。
+- 按整天统计，含首尾两天，最长 400 天（与小时明细保留天数一致）。
+
+## 备份与还原
+
+在“设置”里：
+
+- 下载备份：一个 `.db` 文件，包含所有服务器设置、Agent Token、周期历史与小时明细。内含 Token，请妥善保管。
+- 从备份还原：先验证文件（格式、完整性、表结构），再完全替换当前数据。还原前自动保存 `traffic.db.before-restore-时间`（保留最近 5 份）；当前登录密码不变。
+
+迁移面板：旧面板下载备份 → 新面板还原 → 各台 VPS 把 `/etc/vps-traffic/agent.conf` 的 `SERVER` 改成新地址后 `systemctl restart vps-traffic-agent`。
+
+## Telegram 告警（可选）
+
+在 `/etc/systemd/system/vps-traffic-panel.service` 里填上 `VT_TG_TOKEN` 和 `VT_TG_CHAT`，然后 `systemctl daemon-reload && systemctl restart vps-traffic-panel`。用量到 80%、95%、100% 时各提醒一次。
+
+## 数据保留
+
+- 周期记录：永久保留
+- 每小时明细：保留 400 天
+
+## 已知限制
+
+- 上报失败时 Agent 会累积增量并在下次补送；如果补送时已跨过重置点，这部分会计入新周期
+- 只统计一张网卡；Docker/TUN 等虚拟网卡不计入
+- 面板收到上报但响应丢失时，该次增量可能重复计算一次

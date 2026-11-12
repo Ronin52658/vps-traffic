@@ -1,0 +1,57 @@
+[Unit]
+Description=VPS Traffic Panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/vps-traffic-panel
+ExecStart=/usr/bin/python3 /opt/vps-traffic-panel/server.py
+Environment=VT_LISTEN=0.0.0.0
+Environment=VT_PORT=8080
+Environment=VT_TZ=Asia/Shanghai
+Environment=VT_DB=/var/lib/vps-traffic-panel/traffic.db
+# 用 Docker 里的 Nginx Proxy Manager 反代时，取消下一行注释，面板才能拿到访客和 Agent 的真实 IP
+#Environment=VT_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12
+#Environment=VT_TG_TOKEN=
+#Environment=VT_TG_CHAT=
+Restart=always
+RestartSec=3
+
+# ---- 降权：以专用系统用户 vps-traffic 运行，不是 root ----
+User=vps-traffic
+Group=vps-traffic
+# 唯一可写的目录：数据库、备份临时文件、还原前的安全副本
+StateDirectory=vps-traffic-panel
+StateDirectoryMode=0700
+UMask=0077
+# 只保留绑定 1024 以下端口的能力（端口 ≥ 1024 时用不到，也无害）
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# ---- 只读沙箱 ----
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>VPS 流量</title>
+<meta name="theme-color" content="#E4E9F0">
+<script>
+// 主题：system（跟随系统）/ light（白天）/ dark（夜间）。在页面绘制前就决定，避免闪一下白屏
+(function () {
+  var pref = "system";
+  try { pref = localStorage.getItem("vt-theme") || "system"; } catch (e) {}
+  var mq = window.matchMedia ? matchMedia("(prefers-color-scheme: dark)") : null;
+  var root = document.documentElement;
+  function systemDark() {
+    // 嵌在别的页面里（例如预览）时，优先看外层给的 data-theme
+    var host = root.getAttribute("data-theme");
+    if (host === "dark" || host === "light") return host === "dark";
+    return !!(mq && mq.matches);
+  }
+  function apply() {
+    var dark = pref === "dark" || (pref === "system" && systemDark());
+    root.setAttribute("data-mode", dark ? "dark" : "light");
+    var m = document.querySelector('meta[name="theme-color"]');
+    if (m) m.setAttribute("content", dark ? "#1D2129" : "#E4E9F0");
+  }
+  window.__theme = {
+    get: function () { return pref; },
+    set: function (v) { pref = v; try { localStorage.setItem("vt-theme", v); } catch (e) {} apply(); }
+  };
+  apply();
+  if (mq && mq.addEventListener) mq.addEventListener("change", function () { if (pref === "system") apply(); });
+  if (window.MutationObserver) new MutationObserver(function () { if (pref === "system") apply(); })
+    .observe(root, {attributes: true, attributeFilter: ["data-theme"]});
+})();
+</script>
+<style>
+:root{
+  --bg:#E4E9F0; --hi:#FFFFFF; --lo:#BFC8D6; --ink:#1F2A37; --muted:#5D6B7C;
+  --rx:#3A6FE0; --tx:#E58B33; --danger:#D6453A; --ok:#2FA36B; --line:#D2D9E3;
+  --raise:7px 7px 16px var(--lo), -7px -7px 16px var(--hi);
+  --raise-sm:3px 3px 7px var(--lo), -3px -3px 7px var(--hi);
+  --inset:inset 4px 4px 8px var(--lo), inset -4px -4px 8px var(--hi);
+  --inset-sm:inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
+  color-scheme: light;
+}
+/* ---------- 夜间主题 ----------
+   深蓝灰底色，阴影收得更紧、更柔，避免暗色拟物常见的“脏”感；
+   强调色调亮一档，进度条和指示灯带一点微光，夜里看更清楚又不刺眼 */
+html[data-mode="dark"]{
+  --bg:#1D2129; --hi:#272C36; --lo:#12151B; --ink:#E3E8EF; --muted:#8E99A8;
+  --rx:#78A6FF; --tx:#FFAE62; --danger:#FF7B70; --ok:#4FD69C; --line:#2C323D;
+  --raise:6px 6px 14px var(--lo), -5px -5px 12px var(--hi), inset 0 1px 0 rgba(255,255,255,.035);
+  --raise-sm:3px 3px 7px var(--lo), -2px -2px 6px var(--hi), inset 0 1px 0 rgba(255,255,255,.03);
+  --inset:inset 4px 4px 9px var(--lo), inset -3px -3px 7px var(--hi);
+  --inset-sm:inset 2px 2px 5px var(--lo), inset -2px -2px 4px var(--hi);
+  color-scheme: dark;
+}
+html[data-mode="dark"] body{
+  background:radial-gradient(1200px 600px at 15% -10%, #252B36 0%, transparent 60%),
+             radial-gradient(900px 500px at 100% 0%, #1F2530 0%, transparent 55%), var(--bg);
+  background-attachment:fixed;
+}
+html[data-mode="dark"] .btn.primary{box-shadow:var(--raise-sm),0 4px 14px color-mix(in srgb,var(--rx) 30%,transparent)}
+html[data-mode="dark"] .mini .lv0{box-shadow:0 0 6px color-mix(in srgb,var(--ok) 45%,transparent)}
+html[data-mode="dark"] .mini .lv1{box-shadow:0 0 6px color-mix(in srgb,var(--tx) 45%,transparent)}
+html[data-mode="dark"] .mini .lv2{box-shadow:0 0 6px color-mix(in srgb,var(--danger) 50%,transparent)}
+html[data-mode="dark"] .led.on{box-shadow:0 0 0 2px color-mix(in srgb,var(--ok) 22%,transparent),0 0 10px var(--ok)}
+html[data-mode="dark"] .flag img{filter:drop-shadow(0 1px 2px rgba(0,0,0,.5)) brightness(.92)}
+html[data-mode="dark"] .sheet{background:rgba(5,7,10,.55)}
+html[data-mode="dark"] .toast{background:#E3E8EF;color:#1D2129}
+html[data-mode="dark"] .meter .knob,html[data-mode="dark"] .mini .knob{background:var(--hi)}
+html[data-mode="dark"] svg.line path[fill="none"]{filter:drop-shadow(0 0 3px rgba(120,166,255,.18))}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink)}
+body{
+  font-family:"PingFang SC","HarmonyOS Sans SC","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+  font-size:15px;line-height:1.55;
+  padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px);
+}
+.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--rx);outline-offset:3px}
+.wrap{max-width:1360px;margin:0 auto;padding:22px 18px 60px}
+
+/* ---------- 基础控件：凸起 / 凹陷 ---------- */
+.btn{border:0;background:var(--bg);border-radius:12px;padding:9px 16px;box-shadow:var(--raise-sm);transition:box-shadow .12s}
+.btn:active{box-shadow:var(--inset-sm)}
+.btn.primary{background:linear-gradient(145deg,var(--rx),color-mix(in srgb,var(--rx) 72%,#000));color:#fff;font-weight:600}
+.btn.danger{color:var(--danger)}
+.btn:disabled{opacity:.5;cursor:default}
+.well{background:var(--bg);border-radius:14px;box-shadow:var(--inset)}
+.card{background:var(--bg);border-radius:18px;box-shadow:var(--raise);padding:16px}
+input,select{border:0;background:var(--bg);border-radius:10px;padding:10px 12px;box-shadow:var(--inset-sm);width:100%;color:var(--ink)}
+input[type=file]{padding:8px}
+label{display:grid;gap:6px;font-size:13px;color:var(--muted)}
+.hint{font-size:12.5px;color:var(--muted);margin:0}
+.err{color:var(--danger);font-size:13px;min-height:18px;margin:0}
+.actions{display:flex;gap:10px;flex-wrap:wrap}
+
+/* LED 状态灯 */
+.led{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:9px;vertical-align:1px;background:var(--lo);box-shadow:var(--inset-sm)}
+.led.on{background:var(--ok);box-shadow:0 0 0 2px color-mix(in srgb,var(--ok) 25%,transparent),0 0 8px var(--ok)}
+
+/* ---------- 顶部 ---------- */
+header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin:6px 0 26px;flex-wrap:wrap}
+header h1{font-size:30px;line-height:1.1;margin:0;font-weight:700;letter-spacing:.03em}
+header .sub{color:var(--muted);font-size:13px;margin-top:8px}
+.legend{display:flex;gap:16px;font-size:12.5px;color:var(--muted);margin:0 4px 16px;flex-wrap:wrap}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+.legend .knob{width:12px;height:12px;border-radius:50%;background:var(--bg);box-shadow:1px 1px 3px var(--lo),-1px -1px 3px var(--hi),inset 0 0 0 3px var(--bg),inset 0 0 0 4.5px var(--ink);vertical-align:-2px}
+
+/* ---------- 服务器卡片 ---------- */
+.list{display:grid;gap:22px;grid-template-columns:repeat(auto-fill,minmax(310px,1fr))}
+/* 顶部汇总 */
+.tiles{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin:0 0 22px}
+.tile{padding:14px 16px;border-radius:16px;background:var(--bg);box-shadow:var(--raise-sm)}
+.tile small{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}
+.tile strong{font-size:22px;font-weight:700;letter-spacing:.01em}
+.tile em{font-style:normal;font-size:12.5px;color:var(--muted);margin-left:4px;font-weight:500}
+.tile .sub{font-size:12px;color:var(--muted);margin-top:2px;white-space:nowrap}
+/* 卡片内资源格 */
+.res{display:grid;grid-template-columns:1fr 1fr;gap:12px 18px;margin:14px 0 12px}
+.res .k{display:flex;justify-content:space-between;align-items:baseline;font-size:13px}
+.res .k b{font-weight:650}
+.res .k .lbl{color:var(--muted)}
+.res .v{font-size:12px;color:var(--muted);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mini{position:relative;height:9px;border-radius:5px;margin-top:6px;background:var(--bg);box-shadow:var(--inset-sm)}
+.mini span{position:absolute;left:2px;top:2px;bottom:2px;border-radius:3px;max-width:calc(100% - 4px)}
+.mini .knob{position:absolute;top:50%;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;border-radius:50%;background:var(--bg);box-shadow:1px 1px 3px var(--lo),-1px -1px 3px var(--hi),inset 0 0 0 3px var(--bg),inset 0 0 0 4.5px var(--ink)}
+.lv0{background:var(--ok)} .lv1{background:var(--tx)} .lv2{background:var(--danger)}
+.chiprow{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.tag{font-size:11.5px;color:var(--muted);padding:2px 9px;border-radius:8px;box-shadow:var(--inset-sm);white-space:nowrap}
+.flag{display:inline-flex;align-items:center}
+.flag img{height:18px;width:auto;display:block;filter:drop-shadow(0 1px 1px rgba(0,0,0,.25))}
+.flag .cc{font-size:11px;font-weight:650;color:var(--muted);padding:1px 6px;border-radius:6px;box-shadow:var(--inset-sm)}
+.trio{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.trio .well{padding:8px 12px;font-size:12.5px;line-height:1.6;border-radius:12px;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.trio small{display:block;font-size:11px;color:var(--muted)}
+.trio .r{color:var(--rx)} .trio .t{color:var(--tx)}
+/* 详情：信息格 */
+.info{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.info .well{padding:10px 12px;min-width:0}
+.info small{display:block;color:var(--muted);font-size:12px}
+.info div div{font-size:13.5px;word-break:break-word}
+.charts{display:grid;gap:18px;grid-template-columns:1fr;margin-top:18px}
+.charts .card{padding:14px}
+.chart-title{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:8px;font-size:13px}
+.chart-title b{font-size:14px}
+.lgd{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);margin-top:6px}
+.lgd i{display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:5px;vertical-align:3px}
+svg.line{width:100%;height:auto;display:block;touch-action:pan-y}
+.row{display:block;width:100%;text-align:left;border:0;background:var(--bg);border-radius:20px;padding:18px 20px;box-shadow:var(--raise);transition:box-shadow .15s}
+.row:active{box-shadow:var(--inset)}
+.row-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+.name{font-weight:650;font-size:16.5px}
+.rates{font-size:13px;color:var(--muted)}
+.rates b{font-weight:600}
+.rates .r{color:var(--rx)} .rates .t{color:var(--tx)}
+
+/* 用量表：凹槽 + 凸起填充 + 时间旋钮 */
+.meter{position:relative;height:18px;border-radius:9px;margin:14px 0 10px;background:var(--bg);box-shadow:var(--inset)}
+.meter .fill{position:absolute;left:4px;top:4px;bottom:4px;right:4px;display:flex;border-radius:6px;overflow:hidden}
+.meter .fill span{height:100%;box-shadow:inset 0 1px 0 rgba(255,255,255,.35)}
+.meter .tick{position:absolute;top:3px;bottom:3px;width:2px;border-radius:1px;background:var(--lo)}
+.meter .knob{position:absolute;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;background:var(--bg);box-shadow:2px 2px 5px var(--lo),-2px -2px 5px var(--hi),inset 0 0 0 4px var(--bg),inset 0 0 0 6px var(--ink)}
+.meter.over{box-shadow:var(--inset),0 0 0 2px var(--danger)}
+.meta{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+.meta .used{color:var(--ink);font-weight:650}
+.pace-hot{color:var(--danger);font-weight:600}
+.empty{padding:40px 20px;text-align:center;color:var(--muted)}
+
+/* ---------- 侧滑面板 ---------- */
+.sheet{position:fixed;inset:0;background:rgba(20,26,34,.35);display:none;z-index:10}
+.sheet.open{display:block}
+.panel{position:absolute;right:0;top:0;bottom:0;width:min(660px,100%);background:var(--bg);overflow-y:auto;
+  padding:calc(env(safe-area-inset-top,0px) + 20px) 20px calc(env(safe-area-inset-bottom,0px) + 40px);
+  box-shadow:-10px 0 30px rgba(0,0,0,.18);animation:slide .22s ease-out}
+@keyframes slide{from{transform:translateX(24px);opacity:.6}to{transform:none;opacity:1}}
+@media (prefers-reduced-motion:reduce){.panel{animation:none}}
+.panel-top{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
+.panel h2{margin:0;font-size:22px}
+.panel .card + .card{margin-top:18px}
+
+/* 分段选择：凹槽里一个凸起滑块 */
+.seg{display:flex;gap:4px;padding:5px;border-radius:14px;background:var(--bg);box-shadow:var(--inset);overflow-x:auto}
+.seg button{flex:1 0 auto;border:0;background:transparent;border-radius:10px;padding:7px 12px;font-size:13.5px;color:var(--muted);white-space:nowrap}
+.seg button.on{background:var(--bg);color:var(--ink);font-weight:600;box-shadow:var(--raise-sm)}
+.tabs{margin:20px 0}
+
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin:4px 0 4px}
+.stats div{padding:12px 14px}
+.stats small{display:block;color:var(--muted);font-size:12px}
+.stats strong{font-size:18px;font-weight:650}
+.chart-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.readout{font-size:13px;color:var(--muted);min-height:20px;margin:6px 0}
+.chart-well{padding:10px 8px 4px}
+svg.chart{width:100%;height:auto;display:block}
+svg.chart rect.hit{fill:transparent;cursor:pointer}
+svg.chart rect.hit:hover{fill:color-mix(in srgb,var(--lo) 40%,transparent)}
+svg.chart .bar,svg.chart text{pointer-events:none}
+
+/* 日期区间 */
+.range-row{display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:end}
+.range-row .to{padding-bottom:10px;color:var(--muted)}
+.chips{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
+.chip{border:0;background:var(--bg);border-radius:20px;padding:6px 13px;font-size:13px;box-shadow:var(--raise-sm)}
+.chip:active,.chip.on{box-shadow:var(--inset-sm);color:var(--rx)}
+
+/* 表格 */
+.table-wrap{overflow-x:auto;padding:4px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:10px 8px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th:first-child,td:first-child{text-align:left;white-space:normal;min-width:140px}
+th{color:var(--muted);font-weight:500}
+tr.current td,tr.total td{font-weight:650}
+tr.total td{border-bottom:0}
+.badge{white-space:nowrap;display:inline-block;font-size:11px;padding:1px 7px;border-radius:6px;color:var(--muted);box-shadow:var(--inset-sm);margin-left:6px}
+
+form{display:grid;gap:14px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+pre.cmd{user-select:all;-webkit-user-select:all;border-radius:12px;box-shadow:var(--inset-sm);padding:12px;white-space:pre-wrap;word-break:break-all;font-size:12px;margin:8px 0 12px}
+h3{font-size:15px;margin:0 0 6px}
+.order{display:grid;gap:10px}
+.order-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 8px 8px 14px;border-radius:12px;box-shadow:var(--inset-sm)}
+.order-name{display:flex;align-items:center;gap:8px;min-width:0}
+.order-name > span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.btn.sq{padding:5px 10px;min-width:36px}
+.order .actions{flex-wrap:nowrap;gap:8px}
+
+/* 登录 */
+.login{max-width:340px;margin:16vh auto;padding:0 18px}
+.login .card{padding:26px}
+.login h1{font-size:28px;margin:0 0 6px}
+.toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 22px);transform:translateX(-50%);
+  background:var(--ink);color:var(--bg);padding:9px 18px;border-radius:12px;font-size:14px;z-index:20;display:none}
+@media (max-width:420px){.wrap{padding:18px 14px 50px}.row{padding:16px}.grid2{grid-template-columns:1fr}.tile strong{font-size:19px}}
+</style>
+</head>
+<body>
+
+<div id="loginView" class="login" hidden>
+  <div class="card">
+    <h1 class="siteName">VPS 流量</h1>
+    <p class="hint" style="margin-bottom:18px">请输入面板密码</p>
+    <form id="loginForm">
+      <label>密码<input type="password" name="password" autocomplete="current-password" required></label>
+      <p class="err" id="loginErr"></p>
+      <button class="btn primary" type="submit">登录</button>
+    </form>
+  </div>
+</div>
+
+<div id="mainView" class="wrap" hidden>
+  <header>
+    <div>
+      <h1 class="siteName">VPS 流量</h1>
+    </div>
+    <div class="actions">
+      <button class="btn" id="rangeBtn">区间统计</button>
+      <button class="btn" id="settingsBtn">设置</button>
+    </div>
+  </header>
+  <div class="tiles num" id="tilesTop"></div>
+  <div class="legend">
+    <span><i style="background:var(--rx)"></i>下行</span>
+    <span><i style="background:var(--tx)"></i>上行</span>
+    <span><i class="knob"></i>流量周期时间进度</span>
+  </div>
+  <div class="list" id="list"></div>
+</div>
+
+<div class="sheet" id="sheet">
+  <div class="panel" id="panel" role="dialog" aria-modal="true"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const BILLING = {sum:"双向相加", out:"仅上行", in:"仅下行", max:"取较大方向"};
+let META = {}, SERVERS = [], CUR = null, TAB = "monitor", MRANGE = "live", lastCharts = 0, RANGE = 30, timer = null, chartSeq = 0;
+let DRANGE = null;   // 详情页区间 {start, end}
+let GRANGE = null;   // 区间统计 {start, end}
+
+async function api(path, opt = {}) {
+  const r = await fetch(path, {credentials:"same-origin", headers:{"Content-Type":"application/json"}, ...opt});
+  if (r.status === 401 && path !== "/api/login" && path !== "/api/password") { showLogin(); throw new Error("未登录"); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+const GiB = 1024 ** 3;
+function fb(n) {
+  n = Number(n) || 0;
+  const u = ["B","KB","MB","GB","TB","PB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n.toFixed(0) : n.toFixed(n >= 100 ? 1 : 2)) + " " + u[i];
+}
+const fr = n => fb(n).replace(/ (\w+)$/, " $1/s");
+const pad = n => String(n).padStart(2, "0");
+function fd(ts, withTime) {
+  if (!ts) return "—";
+  // 按面板时区显示，与重置点计算一致
+  const s = new Date(ts * 1000).toLocaleString("sv-SE", {timeZone: META.tz || undefined, hour12: false});
+  return withTime ? s.slice(0, 16) : s.slice(0, 10);
+}
+// 零点只显示日期，手动重置等非零点才带时间
+function fdc(ts) { const t = fd(ts, true); return t.endsWith("00:00") ? t.slice(0, 10) : t; }
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.style.display = "block"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 2400); }
+function ruleText(s) {
+  if (s.reset_type === "monthly") return `每月 ${s.reset_day} 日重置`;
+  if (s.reset_type === "interval") return `每 ${s.interval_days} 天重置（自 ${s.anchor} 起）`;
+  return "手动重置";
+}
+
+/* ---------- 日期工具（YYYY-MM-DD，按面板时区） ---------- */
+const todayIso = () => fd(Date.now() / 1000);
+function addDays(iso, n) { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function daysBetween(a, b) { return Math.round((Date.parse(b + "T00:00:00Z") - Date.parse(a + "T00:00:00Z")) / 86400000) + 1; }
+function monthRange(offset) {
+  const [y, m] = todayIso().split("-").map(Number);
+  const s = new Date(Date.UTC(y, m - 1 + offset, 1)), e = new Date(Date.UTC(y, m + offset, 0));
+  return {start: s.toISOString().slice(0, 10), end: offset === 0 ? todayIso() : e.toISOString().slice(0, 10)};
+}
+const lastDays = n => ({start: addDays(todayIso(), -(n - 1)), end: todayIso()});
+// 周期结束点是下个周期起点的 0 点，所以区间的最后一天要往前推一秒
+const cycleRange = c => ({start: fd(c.start), end: c.end ? fd(c.end - 1) : todayIso()});
+const rangeLabel = r => `${r.start} 至 ${r.end}（${daysBetween(r.start, r.end)} 天）`;
+
+/* ---------- 用量表 ---------- */
+function meter(s) {
+  const c = s.cycle, quota = s.quota_gb * GiB;
+  const now = Date.now() / 1000;
+  let timePct = null;
+  if (c.end) timePct = Math.min(100, Math.max(0, (now - c.start) / (c.end - c.start) * 100));
+  let parts;
+  const scale = quota > 0 ? quota : Math.max(c.used, 1);
+  if (s.billing === "sum") parts = [["rx", c.rx], ["tx", c.tx]];
+  else if (s.billing === "out") parts = [["tx", c.tx]];
+  else if (s.billing === "in") parts = [["rx", c.rx]];
+  else parts = c.rx >= c.tx ? [["rx", c.rx]] : [["tx", c.tx]];
+  const pct = quota > 0 ? c.used / quota * 100 : null;
+  const fills = parts.map(([k, v]) => `<span style="width:${Math.min(100, v / scale * 100)}%;background:var(--${k})"></span>`).join("");
+  const ticks = quota > 0 ? [80, 95].map(p => `<span class="tick" style="left:calc(4px + (100% - 8px) * ${p / 100})"></span>`).join("") : "";
+  const knob = timePct !== null && quota > 0 ? `<span class="knob" style="left:calc(4px + (100% - 8px) * ${timePct / 100})" title="周期时间已过 ${timePct.toFixed(0)}%"></span>` : "";
+  const hot = pct !== null && timePct !== null && pct > timePct + 10 && pct > 20;
+  const daysLeft = c.end ? Math.max(0, Math.ceil((c.end - now) / 86400)) : null;
+  return `
+    ${quota > 0 ? `<div class="meter${pct >= 100 ? " over" : ""}"><div class="fill">${fills}</div>${ticks}${knob}</div>` : `<div style="height:12px"></div>`}
+    <div class="meta num">
+      <span><span class="used">${fb(c.used)}</span>${quota > 0 ? ` / ${s.quota_gb} GB（<span class="${hot ? "pace-hot" : ""}">${pct.toFixed(1)}%</span>）` : "（未设额度）"}</span>
+      <span>${daysLeft !== null ? `${daysLeft} 天后重置（${fd(c.end)}）` : "手动重置"}</span>
+    </div>`;
+}
+
+/* ---------- 卡片与汇总 ---------- */
+// 国旗用图片（Windows 上的浏览器不显示国旗 emoji）；图片加载失败时显示两位代码
+const flagSrc = cc => `/flags/${cc.toLowerCase()}.png`;
+const flag = cc => /^[A-Z]{2}$/.test(cc || "")
+  ? `<img src="${flagSrc(cc)}" alt="${cc}" title="${cc}" loading="lazy" onerror="this.outerHTML='<span class=&quot;cc&quot;>${cc}</span>'">` : "";
+const lv = p => p >= 90 ? "lv2" : p >= 70 ? "lv1" : "lv0";
+const pctOf = (u, t) => t > 0 ? u / t * 100 : 0;
+const clamp = v => Math.min(100, Math.max(0, v));
+function upText(sec) {
+  if (sec == null) return "";
+  const d = Math.floor(sec / 86400), h = Math.floor(sec / 3600);
+  return d >= 1 ? `在线 ${d} 天` : h >= 1 ? `在线 ${h} 小时` : `在线 ${Math.max(1, Math.floor(sec / 60))} 分钟`;
+}
+function durText(sec) {
+  if (sec == null) return "—";
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+  return (d ? `${d} 天 ` : "") + (d || h ? `${h} 小时 ` : "") + `${m} 分钟`;
+}
+const shortOs = os => (os || "").replace("GNU/Linux ", "").replace(/ \(.*\)$/, "");
+const mini = (p, cls) => `<div class="mini"><span class="${cls}" style="width:calc((100% - 4px) * ${clamp(p) / 100})"></span></div>`;
+
+function cycleInfo(s) {
+  const c = s.cycle, quota = s.quota_gb * GiB, now = Date.now() / 1000;
+  const pct = quota > 0 ? c.used / quota * 100 : null;
+  const timePct = c.end ? clamp((now - c.start) / (c.end - c.start) * 100) : null;
+  const hot = pct !== null && timePct !== null && pct > timePct + 10 && pct > 20;
+  const daysLeft = c.end ? Math.max(0, Math.ceil((c.end - now) / 86400)) : null;
+  return {c, quota, pct, timePct, hot, daysLeft};
+}
+
+function resCell(label, pct, valText, sub) {
+  return `<div><div class="k"><span class="lbl">${label}</span><b>${pct == null ? "—" : pct.toFixed(1) + "%"}</b></div>
+    ${mini(pct || 0, lv(pct || 0))}<div class="v">${sub}</div></div>`;
+}
+
+function card(s) {
+  const y = s.online ? s.sys : null, i = s.info || {}, k = cycleInfo(s);
+  const memP = y && y.mem_total ? pctOf(y.mem_used, y.mem_total) : null;
+  const diskP = y && y.disk_total ? pctOf(y.disk_used, y.disk_total) : null;
+  const trafficBar = k.quota > 0
+    ? `<div class="mini"><span class="${k.hot ? "lv2" : lv(k.pct)}" style="width:calc((100% - 4px) * ${clamp(k.pct) / 100})"></span>${k.timePct !== null ? `<span class="knob" style="left:calc(2px + (100% - 4px) * ${k.timePct / 100})"></span>` : ""}</div>`
+    : `<div class="mini"></div>`;
+  const tags = [
+    s.online ? (y ? upText(y.uptime) : "在线") : (s.last_seen ? `离线 ${fd(s.last_seen, true).slice(5)}` : "尚未上报"),
+    shortOs(i.os), i.cores ? `${i.cores} 核` : "",
+  ].filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join("");
+  return `
+    <button class="row" data-id="${s.id}">
+      <div class="row-head">
+        <span class="name"><span class="led ${s.online ? "on" : ""}"></span>${esc(s.name)}</span>
+        <span class="flag">${flag(s.country)}</span>
+      </div>
+      <div class="chiprow">${tags}</div>
+      <div class="res num">
+        ${resCell("CPU", y ? y.cpu : null, "", y ? y.load.map(v => v == null ? "-" : v.toFixed(2)).join("　") : "—")}
+        ${resCell("内存", memP, "", y ? `${fb(y.mem_used)} / ${fb(y.mem_total)}` : "—")}
+        ${resCell("硬盘", diskP, "", y ? `${fb(y.disk_used)} / ${fb(y.disk_total)}` : "—")}
+        <div><div class="k"><span class="lbl">流量</span><b class="${k.hot ? "pace-hot" : ""}">${k.pct == null ? "∞" : k.pct.toFixed(1) + "%"}</b></div>
+          ${trafficBar}<div class="v">${fb(k.c.used)} / ${k.quota > 0 ? s.quota_gb + " GB" : "∞"}</div></div>
+      </div>
+      <div class="trio num">
+        <div class="well"><small>实时网速</small><span class="r">↓ ${s.online ? fr(s.rate_rx) : "—"}</span><br><span class="t">↑ ${s.online ? fr(s.rate_tx) : "—"}</span></div>
+        <div class="well"><small>本周期累计</small><span class="r">↓ ${fb(k.c.rx)}</span><br><span class="t">↑ ${fb(k.c.tx)}</span></div>
+      </div>
+      <div class="meta num" style="margin-top:10px"><span>${k.daysLeft !== null ? `${k.daysLeft} 天后重置（${fd(k.c.end)}）` : "手动重置"}</span><span>${BILLING[s.billing]}</span></div>
+    </button>`;
+}
+
+function renderTiles() {
+  const on = SERVERS.filter(s => s.online), sum = f => on.reduce((a, s) => a + (f(s) || 0), 0);
+  const sys = on.filter(s => s.sys);
+  const mu = sys.reduce((a, s) => a + s.sys.mem_used, 0), mt = sys.reduce((a, s) => a + s.sys.mem_total, 0);
+  const du = sys.reduce((a, s) => a + s.sys.disk_used, 0), dt = sys.reduce((a, s) => a + s.sys.disk_total, 0);
+  const tr = SERVERS.reduce((a, s) => a + s.today.rx, 0), tt = SERVERS.reduce((a, s) => a + s.today.tx, 0);
+  const split = t => { const m = t.match(/^([\d.]+) (.+)$/); return m ? `${m[1]}<em>${m[2]}</em>` : t; };
+  const tiles = [
+    ["在线", `${on.length}<em>台</em>`, "", `共 ${SERVERS.length} 台`],
+    ["实时下行", split(fr(sum(s => s.rate_rx))), "rx", "全部服务器合计"],
+    ["实时上行", split(fr(sum(s => s.rate_tx))), "tx", "全部服务器合计"],
+    ["今日流量", split(fb(tr + tt)), "", `↓ ${fb(tr)}　↑ ${fb(tt)}`],
+    ["内存用量", split(fb(mu)), "", `共 ${fb(mt)}`],
+    ["硬盘用量", split(fb(du)), "", `共 ${fb(dt)}`],
+  ];
+  $("#tilesTop").innerHTML = tiles.map(([k, v, c, sub]) => `<div class="tile"><small>${k}</small><strong${c ? ` style="color:var(--${c})"` : ""}>${v}</strong><div class="sub">${sub}</div></div>`).join("");
+}
+
+function renderList() {
+  const el = $("#list");
+  el.innerHTML = SERVERS.length ? SERVERS.map(card).join("")
+    : `<div class="card empty">还没有服务器。打开“设置”，点击“新增服务器”获取安装命令，在 VPS 上运行后即开始统计。</div>`;
+  el.querySelectorAll(".row").forEach(b => b.onclick = () => openDetail(+b.dataset.id));
+  renderTiles();
+}
+
+async function refresh(quiet) {
+  try { SERVERS = await api("/api/servers"); renderList(); } catch (e) { if (!quiet && e.message !== "未登录") toast(e.message); }
+}
+
+/* ---------- 图表 ---------- */
+function barChart(data, labelFn, onPick) {
+  const id = "c" + (++chartSeq);
+  const W = 600, H = 220, padL = 4, padB = 28, n = data.length;
+  const max = Math.max(1, ...data.map(d => d.rx + d.tx));
+  const bw = (W - padL) / n, gap = Math.min(4, bw * 0.25);
+  const step = Math.ceil(n / 6);
+  let bars = "", hits = "", labels = "";
+  data.forEach((d, i) => {
+    const x = padL + i * bw + gap / 2, w = Math.max(0.6, bw - gap);
+    const hr = (d.rx / max) * (H - padB - 24), ht = (d.tx / max) * (H - padB - 24);
+    const yb = H - padB, r = Math.min(3, w / 2);
+    bars += `<rect class="bar" x="${x}" y="${yb - hr}" width="${w}" height="${hr}" fill="var(--rx)"/>`;
+    bars += `<rect class="bar" x="${x}" y="${yb - hr - ht}" width="${w}" height="${ht}" rx="${ht > r * 2 ? r : 0}" fill="var(--tx)"/>`;
+    hits += `<rect class="hit" data-i="${i}" x="${padL + i * bw}" y="0" width="${bw}" height="${H - padB}"/>`;
+    if (i % step === 0) labels += `<text x="${x + w / 2}" y="${H - 6}" font-size="17" text-anchor="middle" fill="var(--muted)">${labelFn(d)}</text>`;
+  });
+  setTimeout(() => document.querySelectorAll(`#${id} rect.hit`).forEach(r => {
+    const f = () => onPick(data[+r.dataset.i]);
+    r.onmouseenter = f; r.onclick = f;
+  }));
+  return `<div class="well chart-well"><svg id="${id}" class="chart" viewBox="0 0 ${W} ${H}" role="img">${hits}${bars}${labels}
+    <text x="${W - 2}" y="16" font-size="16" text-anchor="end" fill="var(--muted)">峰值 ${fb(max)}</text></svg></div>`;
+}
+
+function statWells(items) {
+  return `<div class="stats num">${items.map(([k, v, color]) =>
+    `<div class="well"><small>${k}</small><strong${color ? ` style="color:var(--${color})"` : ""}>${v}</strong></div>`).join("")}</div>`;
+}
+
+/* ---------- 侧滑面板 ---------- */
+function openSheet(html) {
+  $("#sheet").classList.add("open"); document.body.style.overflow = "hidden";
+  $("#panel").innerHTML = html; $("#panel").scrollTop = 0;
+  const c = $("#closeBtn"); if (c) c.onclick = closeSheet;
+}
+function closeSheet() {
+  $("#sheet").classList.remove("open"); document.body.style.overflow = ""; CUR = null; refresh();
+}
+const panelTop = title => `<div class="panel-top"><h2>${title}</h2><button class="btn" id="closeBtn">关闭</button></div>`;
+
+async function openDetail(id) {
+  CUR = id; TAB = "monitor"; MRANGE = "live"; DRANGE = null;
+  openSheet("");
+  await renderDetail();
+}
+
+// 详情页顶部：实时网速、用量条、统计，定时刷新时只重绘这一块，不打断下方的图表和表单
+function detailHead(s) {
+  const c = s.cycle;
+  return `
+    <div class="meta num" style="justify-content:flex-start;gap:14px">
+      <span>${ruleText(s)}</span><span>${BILLING[s.billing]}</span>${s.iface ? `<span>网卡 ${esc(s.iface)}</span>` : ""}${s.hostname ? `<span>${esc(s.hostname)}</span>` : ""}
+    </div>
+    <div class="stats num" style="margin-top:14px">
+      <div class="well"><small>实时下行</small><strong style="color:var(--rx)">${s.online ? fr(s.rate_rx) : "—"}</strong></div>
+      <div class="well"><small>实时上行</small><strong style="color:var(--tx)">${s.online ? fr(s.rate_tx) : "—"}</strong></div>
+    </div>
+    ${meter(s)}
+    ${statWells([["本周期下行", fb(c.rx), "rx"], ["本周期上行", fb(c.tx), "tx"], ["今日下行", fb(s.today.rx)], ["今日上行", fb(s.today.tx)]])}`;
+}
+async function updateDetailHead() {
+  const id = CUR;
+  const s = await api(`/api/servers/${id}`);
+  if (id !== CUR || !$("#dHead")) return;
+  $("#dHead").innerHTML = detailHead(s);
+  const led = $("#panel .panel-top .led"); if (led) led.className = "led" + (s.online ? " on" : "");
+  if (TAB === "monitor" && $("#mInfo")) {
+    $("#mInfo").innerHTML = monitorInfo(s);
+    // 实时图每次刷新；历史区间一分钟刷新一次即可
+    if (MRANGE === "live" || Date.now() - lastCharts > 60000) await loadCharts();
+  }
+}
+
+async function renderDetail() {
+  let s;
+  try { s = await api(`/api/servers/${CUR}`); } catch (e) { toast(e.message); return closeSheet(); }
+  $("#panel").innerHTML = `
+    ${panelTop(`<span class="led ${s.online ? "on" : ""}"></span>${esc(s.name)} <span class="flag">${flag(s.country)}</span>`)}
+    <div id="dHead">${detailHead(s)}</div>
+    <div class="seg tabs" role="tablist">
+      ${[["monitor","监控"],["daily","每日"],["range","区间"],["cycles","周期"],["settings","设置"]].map(([k,v]) =>
+        `<button role="tab" data-tab="${k}" class="${TAB === k ? "on" : ""}">${v}</button>`).join("")}
+    </div>
+    <div id="tabBody"></div>`;
+  $("#closeBtn").onclick = closeSheet;
+  $("#panel").querySelectorAll(".tabs button").forEach(b => b.onclick = () => { TAB = b.dataset.tab; renderDetail(); });
+  if (TAB === "monitor") await tabMonitor(s);
+  else if (TAB === "daily") await tabDaily();
+  else if (TAB === "range") await tabRange(s);
+  else if (TAB === "cycles") await tabCycles();
+  else tabSettings(s);
+}
+
+/* ---------- 监控：系统信息 + 折线图 ---------- */
+function monitorInfo(s) {
+  const y = s.online ? s.sys : null, i = s.info || {};
+  const cell = (k, v) => `<div class="well"><small>${k}</small><div>${v ? esc(v) : "—"}</div></div>`;
+  const sysItems = [
+    ["系统", i.os], ["内核", i.kernel],
+    ["CPU", i.cpu_model ? `${i.cpu_model}（${i.cores} 核）` : ""],
+    ["架构 / 虚拟化", [i.arch, i.virt && i.virt !== "none" ? i.virt : (i.virt === "none" ? "物理机" : "")].filter(Boolean).join(" / ")],
+    ["IP", s.ip], ["运行时间", y ? durText(y.uptime) : ""], ["主机名", s.hostname], ["网卡", s.iface],
+  ];
+  const nowItems = [
+    ["CPU", y ? `${y.cpu.toFixed(1)}%` : ""],
+    ["负载", y ? y.load.map(v => v == null ? "-" : v.toFixed(2)).join(" / ") : ""],
+    ["内存", y ? `${fb(y.mem_used)} / ${fb(y.mem_total)}（${pctOf(y.mem_used, y.mem_total).toFixed(1)}%）` : ""],
+    ["Swap", y ? (y.swap_total ? `${fb(y.swap_used)} / ${fb(y.swap_total)}` : "未启用") : ""],
+    ["硬盘", y ? `${fb(y.disk_used)} / ${fb(y.disk_total)}（${pctOf(y.disk_used, y.disk_total).toFixed(1)}%）` : ""],
+    ["网络连接", y ? `TCP ${y.tcp}，UDP ${y.udp}` : ""], ["进程", y ? String(y.procs) : ""],
+  ];
+  return `
+    <div class="card"><h3>系统信息</h3><div class="info num" style="margin-top:10px">${sysItems.map(([k, v]) => cell(k, v)).join("")}</div></div>
+    <div class="card" style="margin-top:18px"><h3>当前状态</h3><div class="info num" style="margin-top:10px">${nowItems.map(([k, v]) => cell(k, v)).join("")}</div></div>`;
+}
+
+async function tabMonitor(s) {
+  const ranges = [["live", "实时"], ["1h", "1 小时"], ["6h", "6 小时"], ["24h", "24 小时"], ["7d", "7 天"]];
+  $("#tabBody").innerHTML = `
+    <div id="mInfo">${monitorInfo(s)}</div>
+    <div class="seg" style="margin-top:20px" id="mRange">${ranges.map(([k, v]) => `<button data-r="${k}" class="${MRANGE === k ? "on" : ""}">${v}</button>`).join("")}</div>
+    <div class="charts" id="charts"><div class="card empty">载入中…</div></div>`;
+  $("#mRange").querySelectorAll("button").forEach(b => b.onclick = () => {
+    MRANGE = b.dataset.r;
+    $("#mRange").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    loadCharts();
+  });
+  await loadCharts();
+}
+
+const fint = v => String(Math.round(v));
+async function loadCharts() {
+  const id = CUR, rng = MRANGE;
+  const pts = await api(`/api/servers/${id}/metrics?range=${rng}`);
+  if (id !== CUR || rng !== MRANGE || !$("#charts")) return;
+  lastCharts = Date.now();
+  if (pts.length < 2) {
+    $("#charts").innerHTML = `<div class="card empty">${rng === "live"
+      ? "暂无监控数据。新版 Agent 上报一两次后这里就会出现图表；旧版 Agent 需要在 VPS 上重新运行一次安装命令。"
+      : "这个时间范围内的数据还不够，Agent 运行几分钟后就会出现。"}</div>`;
+    return;
+  }
+  const last = pts[pts.length - 1];
+  const charts = [
+    ["CPU", `${(last.cpu ?? 0).toFixed(1)}%`, [["cpu", "CPU", "var(--rx)"]], v => v.toFixed(0) + "%", {max: 100, area: true}],
+    ["负载", (last.load1 ?? 0).toFixed(2), [["load1", "1 分钟负载", "var(--tx)"]], v => v.toFixed(2), {area: true}],
+    ["内存与 Swap", `${fb(last.mem_used)} / ${fb(last.mem_total)}`,
+      [["mem_used", "内存", "var(--rx)"], ["mem_total", "内存总量", "var(--muted)", true], ["swap_used", "Swap", "var(--tx)"]], fb, {}],
+    ["硬盘", `${fb(last.disk_used)} / ${fb(last.disk_total)}`,
+      [["disk_used", "已用", "var(--ok)"], ["disk_total", "总量", "var(--muted)", true]], fb, {}],
+    ["网络速率", `↓ ${fr(last.rx_rate)}　↑ ${fr(last.tx_rate)}`, [["rx_rate", "下行", "var(--rx)"], ["tx_rate", "上行", "var(--tx)"]], fr, {}],
+    ["网络连接", `TCP ${fint(last.tcp ?? 0)}，UDP ${fint(last.udp ?? 0)}`, [["tcp", "TCP", "var(--rx)"], ["udp", "UDP", "var(--ok)"]], fint, {}],
+    ["进程", fint(last.procs ?? 0), [["procs", "进程数", "var(--tx)"]], fint, {area: true}],
+  ];
+  $("#charts").innerHTML = charts.map(([title, head, series, fmt, opt]) => `
+    <div class="card">
+      <div class="chart-title"><b>${title}</b><span class="num" style="color:var(--muted)">${head}</span></div>
+      ${lineChart(pts, series, fmt, opt, rng)}
+      <div class="lgd">${series.map(([, n, c, dash]) => `<span><i style="background:${c}${dash ? ";opacity:.6" : ""}"></i>${n}</span>`).join("")}</div>
+    </div>`).join("");
+}
+
+function niceMax(v) {
+  if (!(v > 0)) return 1;
+  const e = 10 ** Math.floor(Math.log10(v));
+  for (const m of [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (m * e >= v) return m * e;
+  return 10 * e;
+}
+function lineChart(pts, series, fmt, opt, rng) {
+  const id = "l" + (++chartSeq);
+  const W = 600, H = 220, L = 86, R = 10, T = 26, B = 28;
+  const x0 = pts[0].ts, x1 = pts[pts.length - 1].ts;
+  const vals = series.flatMap(([k]) => pts.map(p => +p[k] || 0));
+  const ymax = opt.max ?? niceMax(Math.max(...vals) * 1.05);
+  const X = t => L + (t - x0) / Math.max(1, x1 - x0) * (W - L - R);
+  const Y = v => T + (1 - Math.min(v, ymax) / ymax) * (H - T - B);
+  let grid = "", xl = "", lines = "";
+  for (let i = 0; i <= 4; i++) {
+    const v = ymax * i / 4, y = Y(v);
+    grid += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" stroke="var(--line)" stroke-width="1"/>`
+      + `<text x="${L - 8}" y="${y + 5}" font-size="14" text-anchor="end" fill="var(--muted)">${fmt(v)}</text>`;
+  }
+  const tl = t => rng === "7d" ? fd(t, true).slice(5, 10) : fd(t, true).slice(11, 16);
+  for (let i = 0; i <= 4; i++) {
+    const t = x0 + (x1 - x0) * i / 4;
+    xl += `<text x="${X(t)}" y="${H - 6}" font-size="14" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}" fill="var(--muted)">${tl(t)}</text>`;
+  }
+  series.forEach(([k, , color, dash], si) => {
+    let d = "", pen = false;
+    for (const p of pts) {
+      const v = p[k];
+      if (v == null) { pen = false; continue; }
+      d += `${pen ? "L" : "M"}${X(p.ts).toFixed(1)},${Y(+v).toFixed(1)}`; pen = true;
+    }
+    if (opt.area && si === 0 && d)
+      lines += `<path d="${d}L${X(x1).toFixed(1)},${Y(0)}L${X(x0).toFixed(1)},${Y(0)}Z" fill="${color}" opacity=".12"/>`;
+    lines += `<path d="${d}" fill="none" stroke="${color}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"${dash ? ' stroke-dasharray="6 5" opacity=".6"' : ""}/>`;
+  });
+  setTimeout(() => {
+    const svg = document.getElementById(id); if (!svg) return;
+    const guide = svg.querySelector(".guide"), tip = svg.querySelector(".tip");
+    const move = e => {
+      const r = svg.getBoundingClientRect(), vx = (e.clientX - r.left) / r.width * W;
+      if (vx < L || vx > W - R) return;
+      const t = x0 + (vx - L) / (W - L - R) * (x1 - x0);
+      let p = pts[0]; for (const q of pts) if (Math.abs(q.ts - t) < Math.abs(p.ts - t)) p = q;
+      guide.setAttribute("x1", X(p.ts)); guide.setAttribute("x2", X(p.ts)); guide.style.display = "";
+      tip.textContent = `${fd(p.ts, true).slice(5)}　` + series.filter(s => !s[3]).map(([k, n]) => `${n} ${p[k] == null ? "-" : fmt(+p[k])}`).join("　");
+    };
+    svg.onpointermove = move; svg.onpointerdown = move;
+    svg.onpointerleave = () => { guide.style.display = "none"; tip.textContent = ""; };
+  });
+  return `<svg id="${id}" class="line" viewBox="0 0 ${W} ${H}" role="img">${grid}${xl}${lines}
+    <line class="guide" y1="${T}" y2="${H - B}" stroke="var(--ink)" stroke-width="1" opacity=".5" style="display:none"/>
+    <text class="tip" x="${L}" y="16" font-size="14" fill="var(--ink)"></text></svg>`;
+}
+
+async function tabDaily() {
+  const data = await api(`/api/servers/${CUR}/daily?days=${RANGE}`);
+  const sum = data.reduce((a, d) => [a[0] + d.rx, a[1] + d.tx], [0, 0]);
+  $("#tabBody").innerHTML = `
+    <div class="card">
+      <div class="chart-head">
+        <span class="num" style="font-size:13px">近 ${RANGE} 天 ↓ ${fb(sum[0])}　↑ ${fb(sum[1])}</span>
+        <div class="seg" style="flex:0 0 auto">${[7, 30, 90].map(n => `<button data-n="${n}" class="${RANGE === n ? "on" : ""}">${n} 天</button>`).join("")}</div>
+      </div>
+      <div class="readout num" id="readout">点击柱状图查看当天明细</div>
+      ${barChart(data, d => d.date.slice(5), d => {
+        $("#readout").textContent = `${d.date}　↓ ${fb(d.rx)}　↑ ${fb(d.tx)}　合计 ${fb(d.rx + d.tx)}`;
+        loadHourly(d.date);
+      })}
+    </div>
+    <div class="card" id="hourlyCard" style="margin-top:18px;display:none"></div>`;
+  $("#tabBody").querySelectorAll(".chart-head .seg button").forEach(b => b.onclick = () => { RANGE = +b.dataset.n; tabDaily(); });
+}
+
+let hourlyTimer = null;
+function loadHourly(day, cardId = "hourlyCard") {
+  clearTimeout(hourlyTimer);
+  hourlyTimer = setTimeout(async () => {
+    const data = await api(`/api/servers/${CUR}/hourly?date=${day}`);
+    const card = $("#" + cardId); if (!card) return;
+    card.style.display = "block";
+    card.innerHTML = `<h3>${day} 每小时</h3>
+      <div class="readout num" id="${cardId}R">点击柱状图查看该小时</div>
+      ${barChart(data, d => pad(d.hour), d => { $("#" + cardId + "R").textContent = `${pad(d.hour)}:00　↓ ${fb(d.rx)}　↑ ${fb(d.tx)}`; })}`;
+  }, 250);
+}
+
+/* 区间选择器：两个日期框 + 快捷按钮 */
+function rangePicker(r, presets) {
+  return `
+    <div class="range-row">
+      <label>开始日期<input type="date" id="rStart" value="${r.start}" max="${todayIso()}"></label>
+      <span class="to">至</span>
+      <label>结束日期<input type="date" id="rEnd" value="${r.end}" max="${todayIso()}"></label>
+    </div>
+    <div class="chips">${presets.map((p, i) => `<button class="chip" data-i="${i}">${p[0]}</button>`).join("")}</div>
+    <div class="actions"><button class="btn primary" id="rGo">查询</button></div>
+    <p class="err" id="rErr" style="margin-top:8px"></p>`;
+}
+function bindRangePicker(presets, onQuery) {
+  document.querySelectorAll(".chips .chip").forEach(b => b.onclick = () => {
+    const r = presets[+b.dataset.i][1]();
+    $("#rStart").value = r.start; $("#rEnd").value = r.end; onQuery(r);
+  });
+  $("#rGo").onclick = () => {
+    const r = {start: $("#rStart").value, end: $("#rEnd").value};
+    if (!r.start || !r.end) return $("#rErr").textContent = "请选择开始和结束日期";
+    if (r.end < r.start) return $("#rErr").textContent = "结束日期不能早于开始日期";
+    onQuery(r);
+  };
+}
+
+async function tabRange(s) {
+  const cycles = await api(`/api/servers/${CUR}/cycles`);
+  const cur = cycles.find(c => !c.closed), prev = cycles.find(c => c.closed);
+  const presets = [["本周期", () => cycleRange(cur)]];
+  if (prev) presets.push(["上个周期", () => cycleRange(prev)]);
+  presets.push(["近 7 天", () => lastDays(7)], ["近 30 天", () => lastDays(30)], ["本月", () => monthRange(0)], ["上月", () => monthRange(-1)]);
+  DRANGE = DRANGE || cycleRange(cur);
+  $("#tabBody").innerHTML = `
+    <div class="card">${rangePicker(DRANGE, presets)}
+      <p class="hint">按整天统计，含开始和结束两天。小时明细保留 400 天。</p></div>
+    <div id="rangeResult"></div>
+    <div class="card" id="rHourly" style="margin-top:18px;display:none"></div>`;
+  const run = async r => {
+    $("#rErr").textContent = "";
+    try {
+      const data = await api(`/api/servers/${CUR}/daily?start=${r.start}&end=${r.end}`);
+      DRANGE = r;
+      const rx = data.reduce((a, d) => a + d.rx, 0), tx = data.reduce((a, d) => a + d.tx, 0);
+      const used = s.billing === "out" ? tx : s.billing === "in" ? rx : s.billing === "max" ? Math.max(rx, tx) : rx + tx;
+      $("#rangeResult").innerHTML = `
+        <div class="card" style="margin-top:18px">
+          <h3 class="num">${rangeLabel(r)}</h3>
+          ${statWells([["下行", fb(rx), "rx"], ["上行", fb(tx), "tx"], ["合计", fb(rx + tx)], [`计费用量（${BILLING[s.billing]}）`, fb(used)]])}
+          <div class="readout num" id="rReadout">点击柱状图查看当天明细</div>
+          ${barChart(data, d => d.date.slice(5), d => {
+            $("#rReadout").textContent = `${d.date}　↓ ${fb(d.rx)}　↑ ${fb(d.tx)}　合计 ${fb(d.rx + d.tx)}`;
+            loadHourly(d.date, "rHourly");
+          })}
+        </div>`;
+    } catch (e) { $("#rErr").textContent = e.message; }
+  };
+  bindRangePicker(presets, run);
+  run(DRANGE);
+}
+
+async function tabCycles() {
+  const rows = await api(`/api/servers/${CUR}/cycles`);
+  const reason = {auto: "自动", manual: "手动"};
+  $("#tabBody").innerHTML = `
+    <div class="card table-wrap">
+      <table class="num">
+        <thead><tr><th>周期</th><th>下行</th><th>上行</th><th>计费用量</th><th>额度</th></tr></thead>
+        <tbody>${rows.map(r => `
+          <tr class="${r.closed ? "" : "current"}">
+            <td>${fdc(r.start)}<br><span style="color:var(--muted)">至 ${r.end ? fdc(r.end) : "—"}</span>
+              <span class="badge">${r.closed ? reason[r.reason] || "结束" : "进行中"}</span></td>
+            <td>${fb(r.rx)}</td><td>${fb(r.tx)}</td><td>${fb(r.used)}</td>
+            <td>${r.quota_gb ? `${(r.used / (r.quota_gb * GiB) * 100).toFixed(1)}%` : "—"}</td>
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>
+    <p class="hint" style="margin-top:14px">重置只会结束当前周期并开启新周期，所有历史周期都会保留。</p>`;
+}
+
+function serverForm(s = {}) {
+  const t = s.reset_type || "monthly";
+  return `
+  <form id="srvForm">
+    <div class="grid2">
+      <label>名称<input name="name" required maxlength="64" value="${esc(s.name || "")}" placeholder="例如 HK-NAT-01"></label>
+      <label>地区代码（留空按 IP 自动识别）<input name="country" maxlength="2" value="${esc(s.country_manual || "")}" placeholder="${s.country_auto ? `自动识别：${s.country_auto}` : "例如 SG、HK、US"}" style="text-transform:uppercase"></label>
+    </div>
+    <div class="grid2">
+      <label>每周期额度（GB，0 为不限）<input name="quota_gb" type="number" min="0" step="any" value="${s.quota_gb ?? 1000}"></label>
+      <label>计费方式<select name="billing">${Object.entries(BILLING).map(([k, v]) => `<option value="${k}" ${s.billing === k ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+    </div>
+    <label>重置方式<select name="reset_type">
+      <option value="monthly" ${t === "monthly" ? "selected" : ""}>每月固定日</option>
+      <option value="interval" ${t === "interval" ? "selected" : ""}>每隔 N 天</option>
+      <option value="manual" ${t === "manual" ? "selected" : ""}>仅手动重置</option>
+    </select></label>
+    <div class="grid2" data-for="monthly">
+      <label>每月几号（1–31）<input name="reset_day" type="number" min="1" max="31" value="${s.reset_day || 1}"></label>
+      <p class="hint" style="align-self:end">遇到小月会在当月最后一天重置。</p>
+    </div>
+    <div class="grid2" data-for="interval">
+      <label>间隔天数<input name="interval_days" type="number" min="1" max="3650" value="${s.interval_days || 30}"></label>
+      <label>起算日期<input name="anchor" type="date" value="${s.anchor || ""}"></label>
+    </div>
+    <p class="err" id="formErr"></p>
+    <div class="actions"><button class="btn primary" type="submit">${s.id ? "保存设置" : "新增服务器"}</button></div>
+  </form>`;
+}
+function bindForm(onSubmit) {
+  const f = $("#srvForm");
+  const sync = () => f.querySelectorAll("[data-for]").forEach(el => el.style.display = el.dataset.for === f.reset_type.value ? "" : "none");
+  f.reset_type.onchange = sync; sync();
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const d = Object.fromEntries(new FormData(f));
+    d.quota_gb = +d.quota_gb; d.reset_day = +d.reset_day; d.interval_days = +d.interval_days;
+    if (!d.anchor) delete d.anchor;
+    try { await onSubmit(d); } catch (err) { $("#formErr").textContent = err.message; }
+  };
+}
+
+function installCmd(token) {
+  const b = META.base_url;
+  return `curl -fsSL ${b}/install.sh | sh -s -- --server ${b} --token ${token} --interval ${META.interval || 3}`;
+}
+// navigator.clipboard 只在 HTTPS 或 localhost 下可用；用 IP:端口 访问时退回到 execCommand
+function copyText(t) {
+  const fallback = () => {
+    const ta = document.createElement("textarea");
+    ta.value = t; ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+    document.body.appendChild(ta);
+    ta.focus(); ta.select(); ta.setSelectionRange(0, t.length);
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) {}
+    ta.remove();
+    return ok;
+  };
+  const done = ok => {
+    if (ok) return toast("已复制命令");
+    const pre = $("#cmd");
+    if (pre) { const r = document.createRange(); r.selectNodeContents(pre); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }
+    toast("浏览器不允许自动复制，已帮你选中命令，请长按或 Ctrl+C 复制");
+  };
+  if (navigator.clipboard && window.isSecureContext)
+    navigator.clipboard.writeText(t).then(() => done(true), () => done(fallback()));
+  else done(fallback());
+}
+
+function tabSettings(s) {
+  $("#tabBody").innerHTML = `
+    <div class="card">${serverForm(s)}</div>
+    <div class="card">
+      <h3>安装 Agent</h3>
+      <p class="hint">在这台 VPS 上用 root 运行：</p>
+      <pre class="cmd" id="cmd">${esc(installCmd(s.token))}</pre>
+      <div class="actions">
+        <button class="btn" id="copyBtn">复制命令</button>
+        <button class="btn" id="tokenBtn">重新生成 Token</button>
+      </div>
+      <p class="hint" style="margin-top:10px">默认自动检测默认路由网卡；要指定网卡可在命令后加 <code>--iface eth0</code>。</p>
+    </div>
+    <div class="card">
+      <h3>危险操作</h3>
+      <p class="hint">立即重置会结束当前周期并保留记录。删除服务器会同时删除它的所有历史数据。</p>
+      <div class="actions" style="margin-top:12px">
+        <button class="btn" id="resetBtn">立即重置流量</button>
+        <button class="btn danger" id="delBtn">删除服务器</button>
+      </div>
+    </div>`;
+  bindForm(async d => {
+    await api(`/api/servers/${CUR}`, {method: "PUT", body: JSON.stringify(d)});
+    toast("已保存设置"); renderDetail();
+  });
+  $("#copyBtn").onclick = () => copyText($("#cmd").textContent);
+  $("#tokenBtn").onclick = async () => {
+    if (!confirm("重新生成后，旧 Token 立即失效，需要在 VPS 上重新运行安装命令。继续？")) return;
+    const r = await api(`/api/servers/${CUR}/token`, {method: "POST"});
+    $("#cmd").textContent = installCmd(r.token); toast("已重新生成 Token");
+  };
+  $("#resetBtn").onclick = async () => {
+    if (!confirm(`立即重置“${s.name}”的流量？当前周期会保存到历史。`)) return;
+    await api(`/api/servers/${CUR}/reset`, {method: "POST"}); toast("已重置流量"); TAB = "cycles"; renderDetail();
+  };
+  $("#delBtn").onclick = async () => {
+    if (prompt(`输入服务器名称“${s.name}”确认删除`) !== s.name) return;
+    await api(`/api/servers/${CUR}`, {method: "DELETE"}); toast("已删除服务器"); closeSheet();
+  };
+}
+
+function openAdd() {
+  CUR = null;
+  openSheet(`${panelTop("新增服务器")}<div class="card" style="margin-top:16px" id="addBody">${serverForm()}</div>`);
+  bindForm(async d => {
+    const r = await api("/api/servers", {method: "POST", body: JSON.stringify(d)});
+    $("#addBody").innerHTML = `
+      <h3>已新增“${esc(d.name)}”</h3>
+      <p class="hint">在这台 VPS 上用 root 运行以下命令，大约一分钟后开始出现数据：</p>
+      <pre class="cmd" id="cmd">${esc(installCmd(r.token))}</pre>
+      <div class="actions"><button class="btn primary" id="copyBtn">复制命令</button><button class="btn" id="doneBtn">完成</button></div>`;
+    $("#copyBtn").onclick = () => copyText($("#cmd").textContent);
+    $("#doneBtn").onclick = closeSheet;
+  });
+}
+
+/* ---------- 区间统计（全部服务器） ---------- */
+function openRange() {
+  CUR = null;
+  const presets = [["近 7 天", () => lastDays(7)], ["近 30 天", () => lastDays(30)], ["本月", () => monthRange(0)],
+                   ["上月", () => monthRange(-1)], ["近 90 天", () => lastDays(90)]];
+  GRANGE = GRANGE || monthRange(0);
+  openSheet(`${panelTop("区间统计")}
+    <div class="card" style="margin-top:16px">${rangePicker(GRANGE, presets)}
+      <p class="hint">统计所有服务器在这段时间内的流量，按整天计算，含开始和结束两天。</p></div>
+    <div id="gResult"></div>`);
+  const run = async r => {
+    $("#rErr").textContent = "";
+    try {
+      const d = await api(`/api/range?start=${r.start}&end=${r.end}`);
+      GRANGE = r;
+      const sorted = [...d.servers].sort((a, b) => (b.rx + b.tx) - (a.rx + a.tx));
+      $("#gResult").innerHTML = `
+        <div class="card" style="margin-top:18px">
+          <h3 class="num">${rangeLabel(r)}</h3>
+          ${statWells([["全部下行", fb(d.rx), "rx"], ["全部上行", fb(d.tx), "tx"]])}
+          <div class="table-wrap" style="margin-top:10px">
+            <table class="num">
+              <thead><tr><th>服务器</th><th>下行</th><th>上行</th><th>合计</th><th>计费用量</th></tr></thead>
+              <tbody>${sorted.map(x => `<tr data-id="${x.id}" style="cursor:pointer">
+                <td>${esc(x.name)}<br><span class="hint">${BILLING[x.billing]}</span></td>
+                <td>${fb(x.rx)}</td><td>${fb(x.tx)}</td><td>${fb(x.rx + x.tx)}</td><td>${fb(x.used)}</td></tr>`).join("")}
+                <tr class="total"><td>合计</td><td>${fb(d.rx)}</td><td>${fb(d.tx)}</td><td>${fb(d.rx + d.tx)}</td><td>—</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="hint" style="margin-top:10px">点击某台服务器可查看它在这段时间的每日明细。</p>
+        </div>`;
+      $("#gResult").querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = async () => {
+        CUR = +tr.dataset.id; TAB = "range"; DRANGE = {...GRANGE}; await renderDetail();
+      });
+    } catch (e) { $("#rErr").textContent = e.message; }
+  };
+  bindRangePicker(presets, run);
+  run(GRANGE);
+}
+
+/* ---------- 首页排序 ---------- */
+function renderOrder() {
+  const el = $("#orderList"); if (!el) return;
+  if (!SERVERS.length) { el.innerHTML = `<p class="hint">还没有服务器。</p>`; return; }
+  el.innerHTML = SERVERS.map((s, i) => `
+    <div class="order-row">
+      <span class="order-name"><span class="flag">${flag(s.country)}</span><span>${esc(s.name)}</span></span>
+      <span class="actions">
+        <button class="btn sq" data-mv="top" data-i="${i}" ${i === 0 ? "disabled" : ""} title="置顶" aria-label="置顶">⤒</button>
+        <button class="btn sq" data-mv="up" data-i="${i}" ${i === 0 ? "disabled" : ""} title="上移" aria-label="上移">↑</button>
+        <button class="btn sq" data-mv="down" data-i="${i}" ${i === SERVERS.length - 1 ? "disabled" : ""} title="下移" aria-label="下移">↓</button>
+      </span>
+    </div>`).join("");
+  el.querySelectorAll("[data-mv]").forEach(b => b.onclick = async () => {
+    const i = +b.dataset.i, list = [...SERVERS], [it] = list.splice(i, 1);
+    list.splice(b.dataset.mv === "top" ? 0 : b.dataset.mv === "up" ? i - 1 : i + 1, 0, it);
+    const before = SERVERS; SERVERS = list; renderOrder(); renderList();
+    try { await api("/api/order", {method: "POST", body: JSON.stringify({ids: list.map(s => s.id)})}); }
+    catch (e) { SERVERS = before; renderOrder(); renderList(); toast(e.message); }
+  });
+}
+
+/* ---------- 设置：密码、备份、还原 ---------- */
+function openSettings() {
+  CUR = null;
+  openSheet(`${panelTop("设置")}
+    <div class="card" style="margin-top:16px">
+      <h3>面板名称</h3>
+      <p class="hint" style="margin-bottom:12px">显示在页面标题、首页左上角和登录页。</p>
+      <form id="nameForm" class="range-row" style="grid-template-columns:1fr auto">
+        <label>名称<input name="site_name" maxlength="40" required value="${esc(META.site_name || "VPS 流量")}"></label>
+        <button class="btn primary" type="submit">保存</button>
+      </form>
+      <p class="err" id="nameErr" style="margin-top:8px"></p>
+    </div>
+    <div class="card">
+      <h3>外观</h3>
+      <p class="hint" style="margin-bottom:12px">跟随系统时，手机或电脑切换深色模式，面板会自动跟着变。</p>
+      <div class="seg" id="themeSeg">${[["system", "跟随系统"], ["light", "白天"], ["dark", "夜间"]].map(([k, v]) =>
+        `<button data-theme-opt="${k}" class="${window.__theme.get() === k ? "on" : ""}">${v}</button>`).join("")}</div>
+    </div>
+    <div class="card">
+      <h3>服务器管理</h3>
+      <p class="hint" style="margin-bottom:12px">新增服务器后会生成 Agent 安装命令。修改或删除已有服务器，请在首页点开该服务器，进入“设置”分页。</p>
+      <button class="btn primary" id="addBtn">新增服务器</button>
+      <h3 style="margin-top:20px">首页排序</h3>
+      <p class="hint" style="margin-bottom:12px">点箭头调整顺序，改动立即保存。</p>
+      <div id="orderList" class="order"></div>
+    </div>
+    <div class="card">
+      <h3>刷新间隔</h3>
+      <p class="hint" style="margin-bottom:12px">有人打开面板时，Agent 按“实时间隔”上报，页面也按这个间隔刷新；没人看时自动放慢到“空闲间隔”，省流量。保存后 Agent 在下一次上报时自动跟随，新增服务器的安装命令也会带上实时间隔。</p>
+      <form id="ivForm">
+        <div class="grid2">
+          <label>实时间隔（秒）<input type="number" name="interval" min="1" max="300" step="1" value="${META.interval || 3}" required></label>
+          <label>空闲间隔（秒）<input type="number" name="idle_interval" min="1" max="300" step="1" value="${META.idle_interval || 60}" required></label>
+        </div>
+        <p class="hint num" id="ivHint"></p>
+        <p class="err" id="ivErr"></p>
+        <div class="actions"><button class="btn primary" type="submit">保存</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>修改密码</h3>
+      <form id="pwForm" style="margin-top:10px">
+        <label>当前密码<input type="password" name="old" autocomplete="current-password" required></label>
+        <div class="grid2">
+          <label>新密码（至少 8 位）<input type="password" name="new" autocomplete="new-password" minlength="8" required></label>
+          <label>再输入一次<input type="password" name="confirm" autocomplete="new-password" minlength="8" required></label>
+        </div>
+        <p class="err" id="pwErr"></p>
+        <div class="actions"><button class="btn primary" type="submit">修改密码</button></div>
+      </form>
+      <p class="hint" style="margin-top:10px">修改后，其他设备上的登录会失效，需要用新密码重新登录。</p>
+    </div>
+    <div class="card">
+      <h3>下载备份</h3>
+      <p class="hint" style="margin-bottom:12px">包含所有服务器设置、Agent Token、周期历史与每小时明细。文件内有 Token，请妥善保管。</p>
+      <a class="btn primary" href="/api/backup" download style="display:inline-block;text-decoration:none">下载备份</a>
+    </div>
+    <div class="card">
+      <h3>从备份还原</h3>
+      <p class="hint" style="margin-bottom:12px" id="restoreHint">会用备份文件<b>完全替换</b>当前所有数据。还原前会自动在服务器上保存一份当前数据库，登录密码不会改变。</p>
+      <label>选择备份文件（.db）<input type="file" id="restoreFile" accept=".db,.sqlite,.sqlite3,application/octet-stream"></label>
+      <p class="err" id="restoreErr" style="margin-top:8px"></p>
+      <div class="actions"><button class="btn danger" id="restoreBtn" disabled>还原这份备份</button></div>
+      <div id="restoreResult" class="hint num" style="margin-top:12px"></div>
+    </div>
+    <div class="card">
+      <h3>登录状态</h3>
+      <p class="hint" style="margin-bottom:12px">登录后会在这个浏览器保持 ${META.session_days || 30} 天，期间每次访问都会自动续期，关闭浏览器也不用重新输入密码。在公共电脑上用完请退出登录。</p>
+      <button class="btn" id="logoutBtn">退出登录</button>
+    </div>
+    <p class="hint" style="margin-top:18px">迁移面板时，在新面板还原后，把各台 VPS 上 <code>/etc/vps-traffic/agent.conf</code> 里的 SERVER 改成新地址并重启 Agent；新面板沿用原地址的话，Agent 不用改。</p>`);
+
+  $("#addBtn").onclick = openAdd;
+  $("#nameForm").onsubmit = async e => {
+    e.preventDefault();
+    try {
+      const r = await api("/api/settings", {method: "POST", body: JSON.stringify({site_name: e.target.site_name.value})});
+      META.site_name = r.site_name; applySiteName(r.site_name); $("#nameErr").textContent = ""; toast("已保存面板名称");
+    } catch (err) { $("#nameErr").textContent = err.message; }
+  };
+  renderOrder();
+  $("#themeSeg").querySelectorAll("button").forEach(b => b.onclick = async () => {
+    const v = b.dataset.themeOpt;
+    window.__theme.set(v);
+    $("#themeSeg").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    try { await api("/api/settings", {method: "POST", body: JSON.stringify({theme: v})}); toast("已切换主题"); }
+    catch (e) { toast(e.message); }
+  });
+  // 每次上报（含系统信息）连同 TCP 握手约 1.3 KB
+  const perMonth = n => Math.max(1, Math.round(1300 * 86400 * 30 / n / 1048576));
+  const ivf = $("#ivForm");
+  const ivHint = () => {
+    const a = +ivf.interval.value, b = +ivf.idle_interval.value;
+    if (a >= 1 && b >= 1) $("#ivHint").textContent =
+      `每台 VPS 的上报流量：一直开着面板约 ${perMonth(a)} MB/月，一直没人看约 ${perMonth(Math.max(a, b))} MB/月，实际在两者之间。`;
+  };
+  ivHint(); ivf.interval.oninput = ivHint; ivf.idle_interval.oninput = ivHint;
+  ivf.onsubmit = async e => {
+    e.preventDefault();
+    try {
+      const r = await api("/api/settings", {method: "POST", body: JSON.stringify({interval: +ivf.interval.value, idle_interval: +ivf.idle_interval.value})});
+      META.interval = r.interval; META.idle_interval = r.idle_interval; $("#ivErr").textContent = ""; startLive();
+      toast(`已保存：实时 ${r.interval} 秒，空闲 ${r.idle_interval} 秒`);
+    } catch (err) { $("#ivErr").textContent = err.message; }
+  };
+  $("#logoutBtn").onclick = async () => { await api("/api/logout", {method: "POST"}); showLogin(); };
+  $("#pwForm").onsubmit = async e => {
+    e.preventDefault();
+    const f = e.target;
+    if (f.new.value !== f.confirm.value) return $("#pwErr").textContent = "两次输入的新密码不一致";
+    try {
+      await api("/api/password", {method: "POST", body: JSON.stringify({old: f.old.value, new: f.new.value})});
+      f.reset(); $("#pwErr").textContent = ""; toast("已修改密码");
+    } catch (err) { $("#pwErr").textContent = err.message; }
+  };
+
+  const file = $("#restoreFile"), btn = $("#restoreBtn");
+  file.onchange = () => { btn.disabled = !file.files.length; $("#restoreErr").textContent = ""; };
+  btn.onclick = async () => {
+    const f = file.files[0]; if (!f) return;
+    if (!confirm(`用“${f.name}”替换当前面板的所有数据？`)) return;
+    btn.disabled = true; btn.textContent = "还原中…"; $("#restoreErr").textContent = "";
+    try {
+      const r = await fetch("/api/restore", {method: "POST", credentials: "same-origin",
+        headers: {"Content-Type": "application/octet-stream"}, body: f});
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 401) return showLogin();
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      $("#restoreResult").innerHTML = `已还原 ${j.servers} 台服务器、${j.cycles} 个周期、${j.hourly} 条小时明细。<br>还原前的数据库已保存为 ${esc(j.safety_copy)}。`;
+      toast("已还原备份"); file.value = "";
+    } catch (e) {
+      $("#restoreErr").textContent = e.message;
+    } finally {
+      btn.textContent = "还原这份备份"; btn.disabled = !file.files.length;
+    }
+  };
+}
+
+/* ---------- 启动 ---------- */
+function applySiteName(name) {
+  name = name || "VPS 流量";
+  document.querySelectorAll(".siteName").forEach(el => el.textContent = name);
+  document.title = name;
+}
+fetch("/api/site").then(r => r.json()).then(j => {
+  applySiteName(j.name);
+  // 主题以面板保存的为准，换设备、换浏览器也一致
+  if (j.theme && j.theme !== window.__theme.get()) window.__theme.set(j.theme);
+}).catch(() => {});
+function showLogin() {
+  $("#mainView").hidden = true; $("#loginView").hidden = false;
+  $("#sheet").classList.remove("open"); document.body.style.overflow = ""; clearInterval(timer);
+}
+// 实时刷新：页面可见时按设置的间隔拉取（最快 2 秒）；切到后台或锁屏时暂停，回来立刻刷新
+let ticking = false;
+function startLive() {
+  clearInterval(timer);
+  timer = setInterval(liveTick, Math.max(2, META.interval || 3) * 1000);
+}
+async function liveTick() {
+  if (document.hidden || ticking || $("#mainView").hidden) return;
+  ticking = true;
+  try {
+    await refresh(true);
+    if (CUR && $("#sheet").classList.contains("open")) await updateDetailHead();
+  } catch (e) {} finally { ticking = false; }
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) liveTick(); });
+
+async function showMain() {
+  META = await api("/api/meta");
+  applySiteName(META.site_name);
+  $("#loginView").hidden = true; $("#mainView").hidden = false;
+  await refresh();
+  clearInterval(timer);
+  startLive();
+}
+$("#loginForm").onsubmit = async e => {
+  e.preventDefault();
+  try {
+    await api("/api/login", {method: "POST", body: JSON.stringify({password: e.target.password.value})});
+    e.target.reset(); $("#loginErr").textContent = "";
+    showMain();
+  } catch (err) { $("#loginErr").textContent = err.message; }
+};
+$("#rangeBtn").onclick = openRange;
+$("#settingsBtn").onclick = openSettings;
+$("#sheet").onclick = e => { if (e.target.id === "sheet") closeSheet(); };
+document.addEventListener("keydown", e => { if (e.key === "Escape" && $("#sheet").classList.contains("open")) closeSheet(); });
+showMain().catch(() => showLogin());
+</script>
+</body>
+</html>
