@@ -879,8 +879,14 @@ VALID_BILLING = {"sum", "out", "in", "max"}
 VALID_RESET = {"monthly", "interval", "manual"}
 
 
+SERVER_FIELDS = ("name", "note", "quota_gb", "billing", "reset_type", "reset_day", "interval_days", "country", "anchor")
+
+
 def clean_server_input(b, partial=False):
     out = {}
+    for k in SERVER_FIELDS:                     # 字段只能是字符串、数字、布尔或 null，不能是数组/对象
+        if isinstance(b.get(k), (dict, list)):
+            raise ValueError(f"字段 {k} 格式错误")
     if "name" in b or not partial:
         name = str(b.get("name", "")).strip()[:64]
         if not name:
@@ -1255,7 +1261,7 @@ FLAG_RE = re.compile(r"^/flags/([a-z]{2})\.png$")
 
 STATIC = {"/": ("index.html", "text/html; charset=utf-8")}   # Agent 脚本改从 GitHub 固定提交下载
 
-ROUTE_SRV = re.compile(r"^/api/servers/(\d+)(?:/(daily|hourly|cycles|reset|token|metrics))?$")
+ROUTE_SRV = re.compile(r"^/api/servers/(\d{1,15})(?:/(daily|hourly|cycles|reset|token|metrics))?$")
 
 
 HOST_RE = re.compile(r"^[A-Za-z0-9.-]+(:[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]+\](:[0-9]{1,5})?$")
