@@ -68,6 +68,10 @@ TG_TOKEN = os.environ.get("VT_TG_TOKEN", "")
 TG_CHAT = os.environ.get("VT_TG_CHAT", "")
 
 METRICS_KEEP_DAYS = 7           # 系统监控（CPU/内存等）分钟数据保留天数
+LATENCY_KEEP_DAYS = 30          # 延迟监测分钟数据保留天数
+LATENCY_INTERVALS = (30, 60, 120, 300)   # 可选的探测间隔（秒）
+MAX_LATENCY_TASKS = 50
+MAX_LAT_ITEMS = 300             # 单次上报最多带多少条延迟结果
 HOURLY_KEEP_DAYS = 400          # 小时明细保留天数；周期记录永久保留
 OFFLINE_AFTER = 180             # 超过几秒没上报视为离线
 MAX_DELTA = 50 * 1024 ** 4      # 单次上报上限 50 TiB，防止异常数据
@@ -223,6 +227,34 @@ CREATE TABLE IF NOT EXISTS metrics_minute(
   rx INTEGER NOT NULL DEFAULT 0,
   tx INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(server_id, ts)
+);
+CREATE TABLE IF NOT EXISTS latency_tasks(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'icmp',
+  host TEXT NOT NULL,
+  port INTEGER NOT NULL DEFAULT 0,
+  interval INTEGER NOT NULL DEFAULT 60,
+  sort INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS latency_targets(
+  task_id INTEGER NOT NULL REFERENCES latency_tasks(id) ON DELETE CASCADE,
+  server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY(task_id, server_id)
+);
+CREATE TABLE IF NOT EXISTS latency_minute(
+  server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  task_id INTEGER NOT NULL REFERENCES latency_tasks(id) ON DELETE CASCADE,
+  ts INTEGER NOT NULL,
+  sent INTEGER NOT NULL DEFAULT 0,
+  lost INTEGER NOT NULL DEFAULT 0,
+  rtt_sum REAL NOT NULL DEFAULT 0,
+  rtt_n INTEGER NOT NULL DEFAULT 0,
+  jitter_sum REAL NOT NULL DEFAULT 0,
+  rtt_max REAL,
+  err INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(server_id, task_id, ts)
 );
 """
 
@@ -748,7 +780,156 @@ def handle_report(token, body, ip=""):
             conn.execute("UPDATE servers SET sysinfo=? WHERE id=?", (json.dumps(info, ensure_ascii=False), srv["id"]))
         cyc = conn.execute("SELECT * FROM cycles WHERE id=?", (cyc["id"],)).fetchone()
         check_alert(conn, srv, cyc)
-    return 200, {"ok": True, "interval": current_interval()}   # Agent 按这个值调整上报间隔
+        record_latency(conn, srv["id"], body.get("lat"), now)
+        probes = probes_for(conn, srv["id"])
+    # Agent 按 interval 调整上报间隔，按 probes 更新延迟探测任务
+    return 200, {"ok": True, "interval": current_interval(), "probes": probes}
+
+
+# ---------------------------------------------------------------- 延迟监测
+# 面板只把“探测目标”交给 Agent（类型、主机、端口、间隔），Agent 自己用 ping 或 TCP 连接测量。
+# 目标主机严格校验：只能是 IP 或普通域名，不能以 - 开头（防止被当成 ping 的参数）。
+
+HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
+
+
+def valid_probe_host(h):
+    if not isinstance(h, str) or not h:
+        return False
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        return bool(HOSTNAME_RE.match(h))
+
+
+def clean_latency_input(b):
+    for k in ("name", "kind", "host", "port", "interval"):
+        if isinstance(b.get(k), (dict, list)):
+            raise ValueError(f"字段 {k} 格式错误")
+    name = re.sub(r"[\x00-\x1f]", "", str(b.get("name") or "")).strip()[:40]
+    host = str(b.get("host") or "").strip().strip("[]").lower()
+    if not valid_probe_host(host):
+        raise ValueError("目标须为 IP 或域名，例如 1.1.1.1、2606:4700::1111、example.com")
+    kind = b.get("kind") or "icmp"
+    if kind not in ("icmp", "tcp"):
+        raise ValueError("测试方式无效")
+    port = 0
+    if kind == "tcp":
+        try:
+            port = int(b.get("port"))
+        except (TypeError, ValueError):
+            raise ValueError("TCP 测试需要端口（1–65535）")
+        if not 1 <= port <= 65535:
+            raise ValueError("端口须在 1–65535")
+    try:
+        interval = int(b.get("interval") or 60)
+    except (TypeError, ValueError):
+        raise ValueError("间隔无效")
+    if interval not in LATENCY_INTERVALS:
+        raise ValueError("间隔须为 " + "、".join(map(str, LATENCY_INTERVALS)) + " 秒之一")
+    ids = b.get("servers", [])
+    if not isinstance(ids, list) or not all(type(i) is int and 0 < i < 2 ** 62 for i in ids) or len(ids) > 10000:
+        raise ValueError("服务器列表无效")
+    return {"name": name or host, "kind": kind, "host": host, "port": port, "interval": interval}, sorted(set(ids))
+
+
+def latency_tasks(conn):
+    tasks = [dict(r) for r in conn.execute("SELECT id, name, kind, host, port, interval FROM latency_tasks ORDER BY sort, id")]
+    assign = collections.defaultdict(list)
+    for r in conn.execute("SELECT task_id, server_id FROM latency_targets"):
+        assign[r[0]].append(r[1])
+    for t in tasks:
+        t["servers"] = sorted(assign.get(t["id"], []))
+    return tasks
+
+
+def set_task_servers(conn, tid, ids):
+    conn.execute("DELETE FROM latency_targets WHERE task_id=?", (tid,))
+    conn.executemany("INSERT OR IGNORE INTO latency_targets(task_id, server_id) SELECT ?, id FROM servers WHERE id=?",
+                     [(tid, i) for i in ids])
+
+
+def probes_for(conn, sid):
+    """下发给 Agent 的探测任务：id,类型,主机,端口,间隔;…（只含安全字符，Agent 不用解析 JSON）"""
+    rows = conn.execute("""SELECT t.id, t.kind, t.host, t.port, t.interval FROM latency_tasks t
+                           JOIN latency_targets g ON g.task_id=t.id WHERE g.server_id=? ORDER BY t.id""", (sid,)).fetchall()
+    return ";".join(f"{r[0]},{r[1]},{r[2]},{r[3]},{r[4]}" for r in rows if valid_probe_host(r[2]))
+
+
+def record_latency(conn, sid, items, now):
+    """Agent 送来的结果：[[任务id, 发出, 收到, 平均ms, 抖动ms, 最大ms], …]；收到为 -1 表示探测出错"""
+    if not isinstance(items, list):
+        return
+    allowed = {r[0] for r in conn.execute("SELECT task_id FROM latency_targets WHERE server_id=?", (sid,))}
+    m = now - now % 60
+    for it in items[:MAX_LAT_ITEMS]:
+        if not isinstance(it, list) or len(it) < 6:
+            continue
+        tid = it[0]
+        if type(tid) is not int or tid not in allowed:
+            continue
+        sent, recv = _num(it[1], 0, 1000), _num(it[2], -1, 1000)
+        avg, jit, mx = _num(it[3], 0, 60000), _num(it[4], 0, 60000), _num(it[5], 0, 60000)
+        if sent is None or recv is None:
+            continue
+        sent, recv = int(sent), int(recv)
+        err = 1 if recv < 0 else 0
+        recv = max(0, min(recv, sent))
+        ok = recv > 0 and avg is not None
+        conn.execute("""INSERT INTO latency_minute(server_id, task_id, ts, sent, lost, rtt_sum, rtt_n, jitter_sum, rtt_max, err)
+                        VALUES(?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(server_id, task_id, ts) DO UPDATE SET sent=sent+excluded.sent, lost=lost+excluded.lost,
+                          rtt_sum=rtt_sum+excluded.rtt_sum, rtt_n=rtt_n+excluded.rtt_n, jitter_sum=jitter_sum+excluded.jitter_sum,
+                          rtt_max=MAX(COALESCE(rtt_max, 0), COALESCE(excluded.rtt_max, 0)), err=err+excluded.err""",
+                     (sid, tid, m, 0 if err else sent, 0 if err else sent - recv, avg if ok else 0, 1 if ok else 0,
+                      (jit or 0) if ok else 0, (mx or avg) if ok else None, err))
+
+
+LAT_RANGES = {"1h": 3600, "6h": 6 * 3600, "12h": 12 * 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
+
+
+def latency_series(conn, sid, qs, now):
+    """按区间分桶（最多约 300 个点）：每个任务的平均延迟、丢包率、抖动、峰值"""
+    rng = qs.get("range", ["1h"])[0]
+    if rng == "custom":
+        try:
+            start, end = int(qs["start"][0]), int(qs["end"][0])
+        except (KeyError, ValueError):
+            raise ValueError("自定义区间无效")
+        start = max(start, now - LATENCY_KEEP_DAYS * 86400)
+        end = min(end, now)
+        if end - start < 300:
+            raise ValueError("自定义区间至少 5 分钟")
+    else:
+        end = now
+        start = now - LAT_RANGES.get(rng, 3600)
+    bucket = max(60, -(-(end - start) // 300) // 60 * 60)
+    tasks = [dict(r) for r in conn.execute("""SELECT t.id, t.name, t.kind, t.host, t.port, t.interval FROM latency_tasks t
+                                              JOIN latency_targets g ON g.task_id=t.id WHERE g.server_id=? ORDER BY t.sort, t.id""", (sid,))]
+    rows = conn.execute(f"""SELECT task_id, (ts / {bucket}) * {bucket} AS b, SUM(sent) s, SUM(lost) l, SUM(rtt_sum) rs,
+                                   SUM(rtt_n) rn, SUM(jitter_sum) js, MAX(rtt_max) mx, SUM(err) e
+                            FROM latency_minute WHERE server_id=? AND ts>=? AND ts<=? GROUP BY task_id, b ORDER BY b""",
+                        (sid, start, end)).fetchall()
+    series = collections.defaultdict(list)
+    tot = collections.defaultdict(lambda: [0, 0, 0.0, 0, 0.0, 0])
+    for r in rows:
+        avg = r["rs"] / r["rn"] if r["rn"] else None
+        loss = r["l"] / r["s"] * 100 if r["s"] else None
+        jit = r["js"] / r["rn"] if r["rn"] else None
+        series[r["task_id"]].append([r["b"], avg, loss, jit, r["mx"] if r["rn"] else None, 1 if r["e"] and not r["s"] else 0])
+        t = tot[r["task_id"]]
+        t[0] += r["s"]; t[1] += r["l"]; t[2] += r["rs"]; t[3] += r["rn"]; t[4] += r["js"]; t[5] += r["e"]
+    for t in tasks:
+        pts, s = series.get(t["id"], []), tot.get(t["id"])
+        last = next((p[1] for p in reversed(pts) if p[1] is not None), None)
+        t["points"] = pts
+        t["stats"] = {"last": last,
+                      "avg": s[2] / s[3] if s and s[3] else None,
+                      "loss": s[1] / s[0] * 100 if s and s[0] else None,
+                      "jitter": s[4] / s[3] if s and s[3] else None,
+                      "error": bool(s and s[5] and not s[0])}
+    return {"start": start, "end": end, "bucket": bucket, "tasks": tasks}
 
 
 def today_start(now):
@@ -958,6 +1139,7 @@ def maintenance_loop():
                     ensure_cycle(conn, srv, now)
                 conn.execute("DELETE FROM traffic_hourly WHERE ts<?", (now - HOURLY_KEEP_DAYS * 86400,))
                 conn.execute("DELETE FROM metrics_minute WHERE ts<?", (now - METRICS_KEEP_DAYS * 86400,))
+                conn.execute("DELETE FROM latency_minute WHERE ts<?", (now - LATENCY_KEEP_DAYS * 86400,))
             # 每小时收缩一次 WAL 文件并更新查询统计，长期运行也不会越来越大、越来越慢
             if now - last_ckpt >= 3600:
                 with txn() as conn:
@@ -1128,6 +1310,22 @@ def normalize_restored(conn):
     conn.execute("UPDATE cycles SET alert_level=0 WHERE alert_level NOT IN (0,80,95,100)")
     conn.execute("""DELETE FROM traffic_hourly WHERE typeof(server_id)!='integer' OR server_id NOT IN (SELECT id FROM servers)
                       OR typeof(ts)!='integer' OR typeof(rx)!='integer' OR typeof(tx)!='integer' OR rx<0 OR tx<0""")
+    # 延迟监测：任务字段按正常新增时的规则校验，不合格的任务连同数据删除
+    for r in conn.execute("SELECT * FROM latency_tasks").fetchall():
+        try:
+            f, _ = clean_latency_input({k: r[k] for k in ("name", "kind", "host", "port", "interval")})
+        except (ValueError, TypeError):
+            conn.execute("DELETE FROM latency_tasks WHERE id=?", (r["id"],))
+            continue
+        conn.execute("UPDATE latency_tasks SET name=?, kind=?, host=?, port=?, interval=?, sort=?, created_at=? WHERE id=?",
+                     (f["name"], f["kind"], f["host"], f["port"], f["interval"], _int_in(r["sort"], 0, 2 ** 62, 0),
+                      _int_in(r["created_at"], 0, 2 ** 40, 0), r["id"]))
+    conn.execute("""DELETE FROM latency_targets WHERE typeof(task_id)!='integer' OR typeof(server_id)!='integer'
+                      OR task_id NOT IN (SELECT id FROM latency_tasks) OR server_id NOT IN (SELECT id FROM servers)""")
+    lat_bad = " OR ".join(f"typeof({c}) NOT IN ('integer','real')" for c in ("sent", "lost", "rtt_sum", "rtt_n", "jitter_sum", "err"))
+    conn.execute(f"""DELETE FROM latency_minute WHERE typeof(server_id)!='integer' OR typeof(task_id)!='integer'
+                      OR typeof(ts)!='integer' OR typeof(rtt_max) NOT IN ('integer','real','null') OR {lat_bad}
+                      OR server_id NOT IN (SELECT id FROM servers) OR task_id NOT IN (SELECT id FROM latency_tasks)""")
     cols = ("cpu_sum", "load1", "mem_used", "mem_total", "swap_used", "swap_total", "disk_used", "disk_total",
             "tcp", "udp", "procs", "rx", "tx", "n")
     bad = " OR ".join(f"typeof({c}) NOT IN ('integer','real','null')" for c in cols)
@@ -1266,7 +1464,9 @@ ICONS = {"/favicon.svg": ("icons/favicon.svg", "image/svg+xml"),
          "/apple-touch-icon.png": ("icons/apple-touch-icon.png", "image/png"),
          "/icon-512.png": ("icons/icon-512.png", "image/png")}
 
-ROUTE_SRV = re.compile(r"^/api/servers/(\d{1,15})(?:/(daily|hourly|cycles|reset|token|metrics))?$")
+ROUTE_SRV = re.compile(r"^/api/servers/(\d{1,15})(?:/(daily|hourly|cycles|reset|token|metrics|latency))?$")
+ROUTE_LAT = re.compile(r"^/api/latency/(\d{1,15})$")
+ROUTE_LAT_SRV = re.compile(r"^/api/latency/server/(\d{1,15})$")
 
 
 HOST_RE = re.compile(r"^[A-Za-z0-9.-]+(:[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]+\](:[0-9]{1,5})?$")
@@ -1532,6 +1732,62 @@ class Handler(BaseHTTPRequestHandler):
                 if os.path.exists(p):
                     os.remove(p)
 
+    def api_latency(self, method, path, now):
+        """延迟监测任务管理：任务视图（每个目标选哪些服务器）和服务器视图（每台服务器测哪些目标）"""
+        if path == "/api/latency" and method == "GET":
+            with txn() as conn:
+                return self.send_json(200, {"tasks": latency_tasks(conn), "intervals": LATENCY_INTERVALS})
+        if path == "/api/latency" and method == "POST":
+            f, ids = clean_latency_input(self.read_json())
+            with txn() as conn:
+                if conn.execute("SELECT COUNT(*) FROM latency_tasks").fetchone()[0] >= MAX_LATENCY_TASKS:
+                    raise ValueError(f"最多 {MAX_LATENCY_TASKS} 个测试目标")
+                cur = conn.execute("""INSERT INTO latency_tasks(name, kind, host, port, interval, sort, created_at)
+                                      VALUES(?,?,?,?,?,(SELECT COALESCE(MAX(sort),0)+1 FROM latency_tasks),?)""",
+                                   (f["name"], f["kind"], f["host"], f["port"], f["interval"], now))
+                set_task_servers(conn, cur.lastrowid, ids)
+                return self.send_json(200, {"id": cur.lastrowid})
+        if path == "/api/latency/order" and method == "POST":
+            ids = self.read_json().get("ids")
+            if (not isinstance(ids, list) or len(ids) > MAX_LATENCY_TASKS * 2
+                    or not all(type(i) is int and 0 < i < 2 ** 62 for i in ids)):
+                raise ValueError("排序数据无效")
+            with txn() as conn:
+                for n, tid in enumerate(ids):
+                    conn.execute("UPDATE latency_tasks SET sort=? WHERE id=?", (n, tid))
+            return self.send_json(200, {"ok": True})
+        m = ROUTE_LAT_SRV.match(path)
+        if m and method == "PUT":
+            sid = int(m.group(1))
+            ids = self.read_json().get("tasks")
+            if not isinstance(ids, list) or not all(type(i) is int and 0 < i < 2 ** 62 for i in ids):
+                raise ValueError("任务列表无效")
+            with txn() as conn:
+                if not conn.execute("SELECT 1 FROM servers WHERE id=?", (sid,)).fetchone():
+                    return self.send_json(404, {"error": "服务器不存在"})
+                conn.execute("DELETE FROM latency_targets WHERE server_id=?", (sid,))
+                conn.executemany("INSERT OR IGNORE INTO latency_targets(task_id, server_id) SELECT id, ? FROM latency_tasks WHERE id=?",
+                                 [(sid, t) for t in set(ids)])
+            return self.send_json(200, {"ok": True})
+        m = ROUTE_LAT.match(path)
+        if m and method in ("PUT", "DELETE"):
+            tid = int(m.group(1))
+            with txn() as conn:
+                if not conn.execute("SELECT 1 FROM latency_tasks WHERE id=?", (tid,)).fetchone():
+                    return self.send_json(404, {"error": "测试目标不存在"})
+                if method == "DELETE":
+                    conn.execute("DELETE FROM latency_tasks WHERE id=?", (tid,))   # 历史数据随之删除
+                    return self.send_json(200, {"ok": True})
+                f, ids = clean_latency_input(self.read_json())
+                old = conn.execute("SELECT kind, host, port FROM latency_tasks WHERE id=?", (tid,)).fetchone()
+                conn.execute("UPDATE latency_tasks SET name=?, kind=?, host=?, port=? , interval=? WHERE id=?",
+                             (f["name"], f["kind"], f["host"], f["port"], f["interval"], tid))
+                if (old["kind"], old["host"], old["port"]) != (f["kind"], f["host"], f["port"]):
+                    conn.execute("DELETE FROM latency_minute WHERE task_id=?", (tid,))   # 换了目标，旧数据没有可比性
+                set_task_servers(conn, tid, ids)
+            return self.send_json(200, {"ok": True})
+        return self.send_json(404, {"error": "not found"})
+
     def send_manifest(self):
         """添加到主屏幕用的应用清单，名称跟随面板“设置”里的名称"""
         name = get_site_name()
@@ -1609,6 +1865,8 @@ class Handler(BaseHTTPRequestHandler):
                     set_setting(conn, "theme", b["theme"])
             return self.send_json(200, {"ok": True, "interval": REPORT_INTERVAL, "idle_interval": IDLE_INTERVAL,
                                         "site_name": get_site_name()})
+        if path.startswith("/api/latency"):
+            return self.api_latency(method, path, now)
         if path == "/api/order" and method == "POST":
             ids = self.read_json().get("ids")
             if (not isinstance(ids, list) or len(ids) > MAX_ORDER_IDS
@@ -1664,6 +1922,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, {"ok": True})
             if sub == "daily" and method == "GET":
                 return self.send_json(200, daily_stats(conn, sid, *parse_range(qs, now)))
+            if sub == "latency" and method == "GET":
+                return self.send_json(200, latency_series(conn, sid, qs, now))
             if sub == "metrics" and method == "GET":
                 return self.send_json(200, metrics_series(conn, sid, qs.get("range", ["live"])[0], now))
             if sub == "hourly" and method == "GET":

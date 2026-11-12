@@ -10,7 +10,7 @@ set -e
 
 # agent.sh 的 SHA256：agent.sh 每次修改后用 sh tools/pin_agent.sh hash 更新
 REPO="Ronin52658/vps-traffic"
-AGENT_SHA256="afd56c8ddf647ee22fad1c447da09b20d8f03abc639b8bb3e94171e2b2ac5c0c"
+AGENT_SHA256="c5804c0d25cc74581be6cb69247da8996fa558cc86e1b7b3e0a62dea0ed07d58"
 
 SERVER="" TOKEN="" IFACE="auto" INTERVAL=3 UNINSTALL=0 REF="" AGENT_FILE="" MIRROR=""
 while [ $# -gt 0 ]; do
@@ -118,7 +118,9 @@ UMask=0077
 
 # ---- 只读沙箱 ----
 NoNewPrivileges=yes
-CapabilityBoundingSet=
+# 只留 CAP_NET_RAW：系统自带的 ping 带有这个文件能力，边界集里没有它时 ping 根本无法执行。
+# 因为 NoNewPrivileges=yes，ping 运行时也拿不到这个能力，只能用内核给普通用户的 ICMP（ping_group_range）
+CapabilityBoundingSet=CAP_NET_RAW
 AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=yes

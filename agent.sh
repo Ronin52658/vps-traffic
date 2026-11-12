@@ -1,7 +1,8 @@
 #!/bin/sh
 # VPS 流量监控 Agent：每 INTERVAL 秒读取网卡计数和系统状态，推送到面板
-# 只读取 /proc、df 等本机信息；不监听端口，也不执行面板下发的任何命令
-# 依赖：sh、awk、df、curl 或 wget（Debian 默认即有）
+# 只读取 /proc、df 等本机信息；不监听端口，也不执行面板下发的任何命令。
+# 延迟监测：面板只下发“探测目标”（类型、IP/域名、端口、间隔），Agent 严格校验后自己用 ping 或 TCP 连接测量
+# 依赖：sh、awk、df、curl 或 wget（Debian 默认即有）；ICMP 测试需要 ping，TCP 测试需要 curl
 # 以 systemd 的临时普通用户运行：配置由 systemd 以 root 读取后通过环境变量传入，
 # 状态目录由 systemd 的 StateDirectory 提供（$STATE_DIRECTORY）
 CONF=${CONF:-/etc/vps-traffic/agent.conf}
@@ -17,6 +18,9 @@ SERVER=${SERVER%/}
 
 mkdir -p "$STATE_DIR" 2>/dev/null
 [ -w "$STATE_DIR" ] || { echo "状态目录 $STATE_DIR 不可写" >&2; exit 1; }
+PROBES="$STATE_DIR/probes"      # 面板下发的探测目标：id,类型,主机,端口,间隔;…
+LAT_DIR="$STATE_DIR/lat"        # 待上报的延迟结果，每次探测一个文件
+mkdir -p "$LAT_DIR"
 
 detect_iface() {
   i=$(ip route show default 2>/dev/null | awk '{for(n=1;n<NF;n++) if($n=="dev"){print $(n+1); exit}}')
@@ -102,6 +106,86 @@ info_json() {
     "$(clean "$os")" "$(clean "$(uname -r)")" "$(clean "$(uname -m)")" "$(clean "$model")" "${cores:-0}" "$(clean "$virt")"
 }
 
+# ---- 延迟监测 ----
+# 输出“发出 收到 平均ms 抖动ms 最大ms”；收到为 -1 表示探测本身出错（没有 ping、没有权限等）
+probe_icmp() {
+  case "$1" in *:*) f=-6 ;; *) f=-4 ;; esac
+  ping "$f" -n -q -c 5 -i 1 -W 2 -- "$1" 2>/dev/null | awk '
+    /packets transmitted/ {s=$1; r=$4}
+    /(rtt|round-trip)/ {split($0, a, "="); gsub(/[ a-z]/, "", a[2]); n=split(a[2], v, "/"); avg=v[2]; mx=v[3]; if (n >= 4) jit=v[4]}
+    END { if (s == "") print "0 -1 0 0 0"; else printf "%d %d %s %s %s\n", s, r, (avg == "" ? 0 : avg), (jit == "" ? 0 : jit), (mx == "" ? 0 : mx) }'
+}
+
+# TCP：连 3 次，只量建立连接的时间（连不上或超过 2 秒算丢失）
+probe_tcp() {
+  command -v curl >/dev/null 2>&1 || { echo "0 -1 0 0 0"; return; }
+  h=$1; case "$h" in *:*) h="[$h]" ;; esac
+  out="" k=0
+  while [ $k -lt 3 ]; do
+    t=$(curl -s -o /dev/null --connect-timeout 2 -m 2 -w '%{time_connect}' "telnet://$h:$2" </dev/null 2>/dev/null)
+    out="$out ${t:-0}"; k=$((k + 1))
+  done
+  printf '%s\n' "$out" | awk '{ for (i = 1; i <= NF; i++) { s++; v = $i * 1000; if (v > 0) { r++; sum += v; if (v > mx) mx = v;
+      if (p != "") { d = v - p; if (d < 0) d = -d; j += d; jn++ } p = v } }
+    printf "%d %d %.2f %.2f %.2f\n", s, r, (r ? sum / r : 0), (jn ? j / jn : 0), mx }'
+}
+
+run_probe() {   # id 类型 主机 端口（在后台子进程里运行）
+  IFS=' 	
+'
+  if [ "$2" = tcp ]; then res=$(probe_tcp "$3" "$4"); else res=$(probe_icmp "$3"); fi
+  set -- "$1" $res
+  [ $# -eq 6 ] || return
+  f="$LAT_DIR/$(date +%s).$1"
+  printf '[%s,%s,%s,%s,%s,%s]' "$1" "$2" "$3" "$4" "$5" "$6" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+
+# 后台探测循环：每 5 秒看一次哪些目标到时间了，到了就在后台跑一次
+prober() {
+  set -f
+  while :; do
+    now=$(date +%s)
+    if [ -f "$PROBES" ]; then
+      old_ifs=$IFS; IFS=';'
+      for item in $(cat "$PROBES"); do
+        IFS=,; set -- $item; IFS=';'
+        [ $# -eq 5 ] || continue
+        id=$1 kind=$2 host=$3 port=$4 iv=$5
+        # 再校验一遍：面板被攻破也只能让 Agent ping/连接一个 IP 或域名，不能注入参数
+        case "$id$port$iv" in *[!0-9]*|"") continue ;; esac
+        case "$kind" in icmp|tcp) ;; *) continue ;; esac
+        case "$host" in -*|*[!A-Za-z0-9.:-]*|"") continue ;; esac
+        [ "$iv" -ge 30 ] && [ "$iv" -le 300 ] || continue
+        eval "last=\${last_$id:-0}"
+        if [ $((now - last)) -ge "$iv" ]; then
+          eval "last_$id=$now"
+          run_probe "$id" "$kind" "$host" "$port" &
+        fi
+      done
+      IFS=$old_ifs
+    fi
+    sleep 5
+  done
+}
+
+# 选出这次要上报的延迟结果（最多 300 条，设到 lat_files）；积压超过 2000 条时丢掉最旧的
+lat_pick() {
+  n=$(ls "$LAT_DIR" | grep -c '^[0-9]*\.[0-9]*$')
+  [ "$n" -gt 2000 ] && ls "$LAT_DIR" | grep '^[0-9]*\.[0-9]*$' | sort -n | head -n $((n - 2000)) | (cd "$LAT_DIR" && xargs rm -f)
+  lat_files=$(ls "$LAT_DIR" | grep '^[0-9]*\.[0-9]*$' | sort -n | head -n 300)
+}
+
+lat_json() {
+  [ -n "$lat_files" ] || return
+  printf ',"lat":['
+  first=1
+  for f in $lat_files; do
+    [ $first = 1 ] || printf ','
+    cat "$LAT_DIR/$f"; first=0
+  done
+  printf ']'
+}
+
 save_state() {
   printf '%s %s %s %s %s\n' "$ifc" "$last_rx" "$last_tx" "$pend_rx" "$pend_tx" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
 }
@@ -113,6 +197,7 @@ pend_rx=${pend_rx:-0}; pend_tx=${pend_tx:-0}
 
 HOST=$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9._-')
 ifc="" cpu_t="" cpu_i="" info_at=""
+prober &
 
 while :; do
   if [ "$IFACE" = "auto" ]; then ifc=$(detect_iface); else ifc=$IFACE; fi
@@ -137,9 +222,18 @@ while :; do
     if [ -z "$info_at" ] || [ $((up - info_at)) -ge 600 ] || [ "$up" -lt "$info_at" ]; then
       info=",\"info\":$(info_json)"; info_at=$up
     fi
-    body=$(printf '{"rx":%s,"tx":%s,"iface":"%s","hostname":"%s","sys":%s%s}' "$pend_rx" "$pend_tx" "$(clean "$ifc")" "$HOST" "$sys" "$info")
+    lat_pick
+    lat=$(lat_json)
+    body=$(printf '{"rx":%s,"tx":%s,"iface":"%s","hostname":"%s","sys":%s%s%s}' "$pend_rx" "$pend_tx" "$(clean "$ifc")" "$HOST" "$sys" "$info" "$lat")
     if resp=$(post "$body"); then
       pend_rx=0 pend_tx=0
+      [ -n "$lat_files" ] && (cd "$LAT_DIR" && rm -f $lat_files)
+      lat_files=""
+      # 更新延迟探测目标（只接受安全字符；面板没带这个字段时保持不变）
+      case "$resp" in *'"probes"'*)
+        p=$(printf '%s' "$resp" | sed -n 's/.*"probes": *"\([A-Za-z0-9.:,;-]*\)".*/\1/p')
+        [ "$p" = "$(cat "$PROBES" 2>/dev/null)" ] || printf '%s' "$p" > "$PROBES" ;;
+      esac
       # 跟随面板“设置”里的刷新间隔（只接受 1–300 秒）
       n=$(printf '%s' "$resp" | sed -n 's/.*"interval": *\([0-9][0-9]*\).*/\1/p')
       if [ -n "$n" ] && [ "$n" -ge 1 ] && [ "$n" -le 300 ]; then INTERVAL=$n; fi

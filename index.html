@@ -237,6 +237,32 @@ h3{font-size:15px;margin:0 0 6px}
 .btn.sq{padding:5px 10px;min-width:36px}
 .order .actions{flex-wrap:nowrap;gap:8px}
 
+/* 延迟监测 */
+.lat-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px}
+.lat-bar .seg{flex:1 1 auto;flex-wrap:wrap}
+.lat-bar .seg button{padding:7px 10px}
+.lat-cards{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin:18px 0}
+.lat-card{position:relative;text-align:left;border:0;background:var(--bg);border-radius:14px;box-shadow:var(--raise-sm);padding:12px 14px 12px 22px;cursor:pointer;min-width:0}
+.lat-card i.c{position:absolute;left:10px;top:13px;bottom:13px;width:4px;border-radius:3px}
+.lat-card b{display:block;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:22px}
+.lat-card .v{font-size:13px;color:var(--muted);margin-top:4px}
+.lat-card .v.bad{color:var(--danger)}
+.lat-card .tip{position:absolute;right:12px;top:10px;color:var(--muted);font-size:13px}
+.lat-card.off{box-shadow:var(--inset-sm);opacity:.5}
+.lat-tools{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.lat-tools .btn.on{box-shadow:var(--inset-sm);color:var(--rx);font-weight:600}
+.lat-tip{font-size:12.5px;color:var(--muted);min-height:18px;margin-top:6px;line-height:1.7}
+.lat-tip span{white-space:nowrap;margin-right:12px}
+.lat-tip i,.lgd i.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:0}
+.lat-row{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:10px 10px 10px 14px;border-radius:12px;box-shadow:var(--inset-sm)}
+.lat-row .t{min-width:0}
+.lat-row .t b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lat-row .t small{display:block;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.checks{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;max-height:260px;overflow:auto;padding:4px}
+.checks label{display:flex;align-items:center;gap:8px;flex-direction:row;color:var(--ink);font-size:13.5px;padding:6px 10px;border-radius:10px;box-shadow:var(--inset-sm);cursor:pointer}
+.checks input{width:auto;box-shadow:none;margin:0;accent-color:var(--rx)}
+@media (max-width:420px){.lat-cards{grid-template-columns:1fr}}
+
 /* 登录 */
 .login{max-width:340px;margin:16vh auto;padding:0 18px}
 .login .card{padding:26px}
@@ -533,6 +559,8 @@ async function updateDetailHead() {
     // 实时图每次刷新；历史区间一分钟刷新一次即可
     if (MRANGE === "live" || Date.now() - lastCharts > 60000) await loadCharts();
   }
+  // 延迟数据每分钟才有新点，一分钟刷新一次；自定义区间不自动刷新
+  if (TAB === "latency" && LAT.range !== "custom" && Date.now() - LAT.loaded > 60000) await loadLatency();
 }
 
 async function renderDetail() {
@@ -542,13 +570,14 @@ async function renderDetail() {
     ${panelTop(`<span class="led ${s.online ? "on" : ""}"></span>${esc(s.name)} <span class="flag">${flag(s.country)}</span>`)}
     <div id="dHead">${detailHead(s)}</div>
     <div class="seg tabs" role="tablist">
-      ${[["monitor","监控"],["daily","每日"],["range","区间"],["cycles","周期"],["settings","设置"]].map(([k,v]) =>
+      ${[["monitor","监控"],["latency","延迟"],["daily","每日"],["range","区间"],["cycles","周期"],["settings","设置"]].map(([k,v]) =>
         `<button role="tab" data-tab="${k}" class="${TAB === k ? "on" : ""}">${v}</button>`).join("")}
     </div>
     <div id="tabBody"></div>`;
   $("#closeBtn").onclick = closeSheet;
   $("#panel").querySelectorAll(".tabs button").forEach(b => b.onclick = () => { TAB = b.dataset.tab; renderDetail(); });
   if (TAB === "monitor") await tabMonitor(s);
+  else if (TAB === "latency") await tabLatency();
   else if (TAB === "daily") await tabDaily();
   else if (TAB === "range") await tabRange(s);
   else if (TAB === "cycles") await tabCycles();
@@ -635,7 +664,7 @@ function lineChart(pts, series, fmt, opt, rng) {
   const W = 600, H = 220, L = 86, R = 10, T = 26, B = 28;
   const x0 = pts[0].ts, x1 = pts[pts.length - 1].ts;
   const vals = series.flatMap(([k]) => pts.map(p => +p[k] || 0));
-  const ymax = opt.max ?? niceMax(Math.max(...vals) * 1.05);
+  const ymax = opt.max ?? niceMax(Math.max(0, ...vals) * 1.05);
   const X = t => L + (t - x0) / Math.max(1, x1 - x0) * (W - L - R);
   const Y = v => T + (1 - Math.min(v, ymax) / ymax) * (H - T - B);
   let grid = "", xl = "", lines = "";
@@ -644,7 +673,7 @@ function lineChart(pts, series, fmt, opt, rng) {
     grid += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" stroke="var(--line)" stroke-width="1"/>`
       + `<text x="${L - 8}" y="${y + 5}" font-size="14" text-anchor="end" fill="var(--muted)">${fmt(v)}</text>`;
   }
-  const tl = t => rng === "7d" ? fd(t, true).slice(5, 10) : fd(t, true).slice(11, 16);
+  const tl = t => rng === "7d" ? fd(t, true).slice(5, 10) : rng === "multi" ? fd(t, true).slice(5, 16) : fd(t, true).slice(11, 16);
   for (let i = 0; i <= 4; i++) {
     const t = x0 + (x1 - x0) * i / 4;
     xl += `<text x="${X(t)}" y="${H - 6}" font-size="14" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}" fill="var(--muted)">${tl(t)}</text>`;
@@ -669,10 +698,11 @@ function lineChart(pts, series, fmt, opt, rng) {
       const t = x0 + (vx - L) / (W - L - R) * (x1 - x0);
       let p = pts[0]; for (const q of pts) if (Math.abs(q.ts - t) < Math.abs(p.ts - t)) p = q;
       guide.setAttribute("x1", X(p.ts)); guide.setAttribute("x2", X(p.ts)); guide.style.display = "";
+      if (opt.onTip) return opt.onTip(p);
       tip.textContent = `${fd(p.ts, true).slice(5)}　` + series.filter(s => !s[3]).map(([k, n]) => `${n} ${p[k] == null ? "-" : fmt(+p[k])}`).join("　");
     };
     svg.onpointermove = move; svg.onpointerdown = move;
-    svg.onpointerleave = () => { guide.style.display = "none"; tip.textContent = ""; };
+    svg.onpointerleave = () => { guide.style.display = "none"; tip.textContent = ""; if (opt.onTip) opt.onTip(null); };
   });
   return `<svg id="${id}" class="line" viewBox="0 0 ${W} ${H}" role="img">${grid}${xl}${lines}
     <line class="guide" y1="${T}" y2="${H - B}" stroke="var(--ink)" stroke-width="1" opacity=".5" style="display:none"/>
@@ -957,6 +987,241 @@ function openAdd() {
   });
 }
 
+/* ---------- 延迟监测：详情页“延迟”分页 ---------- */
+const LAT_COLORS = ["#E5534B", "#3FB8AF", "#8E7CF0", "#4C8DF6", "#F0A43C", "#2FA36B", "#D45FA8", "#9AAE3A", "#E57A2E", "#5B6CD9"];
+const LAT_RANGES = [["1h", "1 小时"], ["6h", "6 小时"], ["12h", "12 小时"], ["24h", "1 天"], ["7d", "7 天"], ["30d", "30 天"], ["custom", "自定义"]];
+const LAT = {range: "1h", hidden: new Set(), smooth: false, loaded: 0, data: null, start: null, end: null};
+const latColor = i => LAT_COLORS[i % LAT_COLORS.length];
+const fms = v => v == null ? "—" : (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + "ms";
+const latTarget = t => t.kind === "tcp" ? `TCP ${t.host.includes(":") ? `[${t.host}]` : t.host}:${t.port}` : `ICMP ${t.host}`;
+// datetime-local 用浏览器本地时间
+const toLocalInput = ts => { const d = new Date(ts * 1000); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+
+async function tabLatency() {
+  const now = Math.floor(Date.now() / 1000);
+  LAT.start = LAT.start || now - 86400; LAT.end = LAT.end || now;
+  $("#tabBody").innerHTML = `
+    <div class="lat-bar">
+      <div class="seg" id="latRange">${LAT_RANGES.map(([k, v]) => `<button data-r="${k}" class="${LAT.range === k ? "on" : ""}">${v}</button>`).join("")}</div>
+    </div>
+    <form id="latCustom" class="range-row" style="margin-top:14px;${LAT.range === "custom" ? "" : "display:none"}">
+      <label>开始<input type="datetime-local" name="s" value="${toLocalInput(LAT.start)}"></label><span class="to">至</span>
+      <label>结束<input type="datetime-local" name="e" value="${toLocalInput(LAT.end)}"></label>
+      <button class="btn primary" type="submit" style="grid-column:1/-1">查询</button>
+    </form>
+    <div id="latBody"><div class="card empty" style="margin-top:18px">载入中…</div></div>`;
+  $("#latRange").querySelectorAll("button").forEach(b => b.onclick = () => {
+    LAT.range = b.dataset.r;
+    $("#latRange").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    $("#latCustom").style.display = LAT.range === "custom" ? "" : "none";
+    loadLatency();
+  });
+  $("#latCustom").onsubmit = e => {
+    e.preventDefault();
+    const s = Date.parse(e.target.s.value) / 1000, en = Date.parse(e.target.e.value) / 1000;
+    if (!(s < en)) return toast("结束时间要晚于开始时间");
+    LAT.start = Math.floor(s); LAT.end = Math.floor(en); loadLatency();
+  };
+  await loadLatency();
+}
+
+async function loadLatency() {
+  const id = CUR;
+  const q = LAT.range === "custom" ? `range=custom&start=${LAT.start}&end=${LAT.end}` : `range=${LAT.range}`;
+  let d;
+  try { d = await api(`/api/servers/${id}/latency?${q}`); } catch (e) { if ($("#latBody")) $("#latBody").innerHTML = `<div class="card empty" style="margin-top:18px">${esc(e.message)}</div>`; return; }
+  if (id !== CUR || TAB !== "latency" || !$("#latBody")) return;
+  LAT.loaded = Date.now(); LAT.data = d;
+  renderLatency();
+}
+
+// 平滑峰值：5 点滑动中位数，压掉偶发尖刺，看趋势更清楚
+function smooth(vals) {
+  return vals.map((v, i) => {
+    if (v == null) return null;
+    const w = vals.slice(Math.max(0, i - 2), i + 3).filter(x => x != null).sort((a, b) => a - b);
+    return w[Math.floor(w.length / 2)];
+  });
+}
+
+function renderLatency() {
+  const d = LAT.data, el = $("#latBody");
+  if (!d.tasks.length) {
+    el.innerHTML = `<div class="card empty" style="margin-top:18px">这台服务器还没有延迟测试目标。<br>到首页“设置”→“延迟监测”添加测试目标并勾选这台服务器。</div>`;
+    return;
+  }
+  const cards = d.tasks.map((t, i) => {
+    const s = t.stats, off = LAT.hidden.has(t.id);
+    const v = s.error ? `<div class="v bad">无法探测${t.kind === "icmp" ? "（这台 VPS 不允许 ping，可改用 TCP）" : ""}</div>`
+      : `<div class="v num">${fms(s.last)} · ${s.loss == null ? "—" : s.loss.toFixed(2) + "%"} · ${s.jitter == null ? "—" : s.jitter.toFixed(2)}</div>`;
+    return `<button class="lat-card${off ? " off" : ""}" data-id="${t.id}" title="${esc(latTarget(t))}，每 ${t.interval} 秒测一次。点卡片显示/隐藏曲线">
+      <i class="c" style="background:${latColor(i)}"></i><b>${esc(t.name)}</b>${v}<span class="tip">ⓘ</span></button>`;
+  }).join("");
+  const anyData = d.tasks.some(t => t.points.length);
+  el.innerHTML = `
+    <div class="lat-cards">${cards}</div>
+    <div class="lat-tools">
+      <button class="btn" id="latAll">全选</button><button class="btn" id="latNone">全不选</button>
+      <button class="btn${LAT.smooth ? " on" : ""}" id="latSmooth" title="用相邻 5 个点的中位数代替原值，去掉偶发的尖刺">平滑峰值</button>
+      <span class="hint">卡片上依次是：当前延迟 · 丢包率 · 抖动（ms），丢包和抖动按所选时间范围统计</span>
+    </div>
+    ${anyData ? `<div class="card"><div class="chart-title"><b>延迟（ms）</b></div><div id="latChart"></div><div class="lat-tip num" id="latTip"></div></div>
+      <div class="card"><div class="chart-title"><b>丢包率（%）</b></div><div id="lossChart"></div></div>`
+    : `<div class="card empty">还没有数据。Agent 收到测试目标后会按设定的间隔开始测量，一两分钟后这里就会出现曲线。<br>如果一直没有，请在这台 VPS 上重新运行一次安装命令，把 Agent 更新到支持延迟监测的版本。</div>`}`;
+  el.querySelectorAll(".lat-card").forEach(b => b.onclick = () => {
+    const id = +b.dataset.id; LAT.hidden.has(id) ? LAT.hidden.delete(id) : LAT.hidden.add(id); renderLatency();
+  });
+  $("#latAll").onclick = () => { LAT.hidden.clear(); renderLatency(); };
+  $("#latNone").onclick = () => { d.tasks.forEach(t => LAT.hidden.add(t.id)); renderLatency(); };
+  $("#latSmooth").onclick = () => { LAT.smooth = !LAT.smooth; renderLatency(); };
+  if (anyData) drawLatency();
+}
+
+function drawLatency() {
+  const d = LAT.data;
+  const vis = d.tasks.map((t, i) => [t, i]).filter(([t]) => !LAT.hidden.has(t.id));
+  // 所有任务按时间桶对齐成一张表，缺的点留空（曲线断开）
+  const tsSet = new Set(); vis.forEach(([t]) => t.points.forEach(p => tsSet.add(p[0])));
+  const ts = [...tsSet].sort((a, b) => a - b);
+  if (ts.length < 2 || !vis.length) {
+    $("#latChart").innerHTML = `<p class="hint" style="padding:30px 0;text-align:center">${vis.length ? "数据点还不够画曲线" : "没有选中的目标"}</p>`;
+    $("#lossChart").innerHTML = ""; return;
+  }
+  const rows = ts.map(t => ({ts: t}));
+  vis.forEach(([t]) => {
+    const m = new Map(t.points.map(p => [p[0], p]));
+    let lat = ts.map(x => m.has(x) ? m.get(x)[1] : null);
+    if (LAT.smooth) lat = smooth(lat);
+    ts.forEach((x, i) => { rows[i]["l" + t.id] = lat[i]; rows[i]["p" + t.id] = m.has(x) ? m.get(x)[2] : null; });
+  });
+  const rng = d.end - d.start > 86400 ? "multi" : "1h";
+  const onTip = p => {
+    const box = $("#latTip"); if (!box) return;
+    box.innerHTML = p ? `<span>${fd(p.ts, true).slice(5)}</span>` + vis.map(([t, i]) =>
+      `<span><i style="background:${latColor(i)}"></i>${esc(t.name)} ${fms(p["l" + t.id])}${p["p" + t.id] ? `（丢包 ${p["p" + t.id].toFixed(1)}%）` : ""}</span>`).join("") : "";
+  };
+  $("#latChart").innerHTML = lineChart(rows, vis.map(([t, i]) => ["l" + t.id, t.name, latColor(i)]), v => v.toFixed(0), {onTip}, rng)
+    + `<div class="lgd">${vis.map(([t, i]) => `<span><i style="background:${latColor(i)}"></i>${esc(t.name)}</span>`).join("")}</div>`;
+  const lossMax = Math.max(0, ...rows.flatMap(r => vis.map(([t]) => r["p" + t.id] || 0)));
+  $("#lossChart").innerHTML = lossMax > 0
+    ? lineChart(rows, vis.map(([t, i]) => ["p" + t.id, t.name, latColor(i)]), v => v.toFixed(0) + "%", {max: lossMax > 50 ? 100 : niceMax(lossMax * 1.1)}, rng)
+    : `<p class="hint" style="padding:16px 0;text-align:center">所选时间范围内没有丢包</p>`;
+}
+
+/* ---------- 延迟监测：管理测试目标（首页“设置”里进入） ---------- */
+const LATM = {view: "task", data: null, editing: null};
+
+async function openLatency() {
+  CUR = null;
+  openSheet(`${panelTop("延迟监测")}
+    <p class="hint" style="margin:6px 0 4px">Agent 按设定的间隔对目标做 ICMP（ping）或 TCP 连接测试，结果在服务器详情的“延迟”分页查看。数据保留 30 天。</p>
+    <div class="lat-bar" style="margin-top:14px">
+      <div class="seg" id="latView"><button data-v="task">任务视图</button><button data-v="server">服务器视图</button></div>
+      <button class="btn primary" id="latAdd">添加</button>
+    </div>
+    <div id="latMgr" style="margin-top:18px"><div class="card empty">载入中…</div></div>`);
+  $("#latView").querySelectorAll("button").forEach(b => b.onclick = () => { LATM.view = b.dataset.v; LATM.editing = null; renderLatMgr(); });
+  $("#latAdd").onclick = () => { LATM.view = "task"; LATM.editing = {}; renderLatMgr(); };
+  await reloadLatMgr();
+}
+async function reloadLatMgr() {
+  try { LATM.data = await api("/api/latency"); if (!SERVERS.length) SERVERS = await api("/api/servers"); }
+  catch (e) { toast(e.message); return; }
+  renderLatMgr();
+}
+const srvName = id => (SERVERS.find(s => s.id === id) || {}).name || `#${id}`;
+
+function renderLatMgr() {
+  const el = $("#latMgr"); if (!el || !LATM.data) return;
+  $("#latView").querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.v === LATM.view));
+  const tasks = LATM.data.tasks;
+  if (LATM.editing) return renderLatForm(el, LATM.editing);
+  if (LATM.view === "server") {
+    if (!SERVERS.length) { el.innerHTML = `<div class="card empty">还没有服务器。</div>`; return; }
+    if (!tasks.length) { el.innerHTML = `<div class="card empty">还没有测试目标，点右上角“添加”。</div>`; return; }
+    el.innerHTML = SERVERS.map(s => `<div class="card">
+      <h3><span class="flag">${flag(s.country)}</span> ${esc(s.name)}</h3>
+      <div class="checks" data-sid="${s.id}">${tasks.map(t => `<label title="${esc(latTarget(t))}">
+        <input type="checkbox" value="${t.id}" ${t.servers.includes(s.id) ? "checked" : ""}>${esc(t.name)}</label>`).join("")}</div></div>`).join("");
+    el.querySelectorAll(".checks[data-sid]").forEach(box => box.onchange = async () => {
+      const ids = [...box.querySelectorAll("input:checked")].map(i => +i.value);
+      try { await api(`/api/latency/server/${box.dataset.sid}`, {method: "PUT", body: JSON.stringify({tasks: ids})}); toast("已保存"); await reloadLatMgr(); }
+      catch (e) { toast(e.message); }
+    });
+    return;
+  }
+  if (!tasks.length) { el.innerHTML = `<div class="card empty">还没有测试目标，点右上角“添加”。<br>例如 1.1.1.1、8.8.8.8，或者你常用的落地机、IX 地址。</div>`; return; }
+  el.innerHTML = `<div class="order">${tasks.map((t, i) => `
+    <div class="lat-row">
+      <div class="t"><b>${esc(t.name)}</b>
+        <small class="num">${esc(latTarget(t))} · 每 ${t.interval} 秒 · ${t.servers.length ? esc(t.servers.map(srvName).join("、")) : "未选服务器"}</small></div>
+      <span class="actions" style="flex-wrap:nowrap;gap:8px">
+        <button class="btn sq" data-mv="up" data-i="${i}" ${i === 0 ? "disabled" : ""} title="上移" aria-label="上移">↑</button>
+        <button class="btn sq" data-mv="down" data-i="${i}" ${i === tasks.length - 1 ? "disabled" : ""} title="下移" aria-label="下移">↓</button>
+        <button class="btn sq" data-edit="${i}">编辑</button>
+      </span>
+    </div>`).join("")}</div>`;
+  el.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => { LATM.editing = tasks[+b.dataset.edit]; renderLatMgr(); });
+  el.querySelectorAll("[data-mv]").forEach(b => b.onclick = async () => {
+    const i = +b.dataset.i, list = [...tasks], [it] = list.splice(i, 1);
+    list.splice(b.dataset.mv === "up" ? i - 1 : i + 1, 0, it);
+    LATM.data.tasks = list; renderLatMgr();
+    try { await api("/api/latency/order", {method: "POST", body: JSON.stringify({ids: list.map(t => t.id)})}); }
+    catch (e) { toast(e.message); await reloadLatMgr(); }
+  });
+}
+
+function renderLatForm(el, t) {
+  const sel = new Set(t.servers || SERVERS.map(s => s.id));
+  el.innerHTML = `<div class="card"><h3>${t.id ? "编辑测试目标" : "添加测试目标"}</h3>
+    <form id="latForm" style="margin-top:10px">
+      <div class="grid2">
+        <label>名称<input name="name" maxlength="40" value="${esc(t.name || "")}" placeholder="例如 Cloudflare、HK-IX（留空用目标地址）"></label>
+        <label>测试方式<select name="kind">
+          <option value="icmp" ${t.kind !== "tcp" ? "selected" : ""}>ICMP（ping）</option>
+          <option value="tcp" ${t.kind === "tcp" ? "selected" : ""}>TCP 端口连接</option></select></label>
+      </div>
+      <div class="grid2">
+        <label>目标 IP 或域名<input name="host" required maxlength="253" value="${esc(t.host || "")}" placeholder="例如 1.1.1.1 或 example.com"></label>
+        <label id="portWrap">端口<input name="port" type="number" min="1" max="65535" value="${t.port || 443}"></label>
+      </div>
+      <label>测试间隔<select name="interval">${LATM.data.intervals.map(v => `<option value="${v}" ${(t.interval || 60) === v ? "selected" : ""}>每 ${v} 秒</option>`).join("")}</select></label>
+      <div>
+        <div class="chart-head" style="margin-bottom:6px"><span class="hint">在哪些服务器上测试</span>
+          <span class="actions" style="gap:8px"><button type="button" class="btn sq" id="selAll">全选</button><button type="button" class="btn sq" id="selNone">全不选</button></span></div>
+        <div class="checks" id="latSrv">${SERVERS.map(s => `<label><input type="checkbox" value="${s.id}" ${sel.has(s.id) ? "checked" : ""}>${esc(s.name)}</label>`).join("")
+          || `<p class="hint">还没有服务器</p>`}</div>
+      </div>
+      <p class="hint">ICMP 需要 VPS 允许普通用户 ping（Debian 11+/Ubuntu 20.04+ 默认允许）；不允许或目标禁 ping 时改用 TCP。修改目标地址、方式或端口后，这个目标的历史数据会清空。</p>
+      <p class="err" id="latErr"></p>
+      <div class="actions">
+        <button class="btn primary" type="submit">保存</button>
+        <button class="btn" type="button" id="latCancel">取消</button>
+        ${t.id ? `<button class="btn danger" type="button" id="latDel" style="margin-left:auto">删除</button>` : ""}
+      </div>
+    </form></div>`;
+  const f = $("#latForm");
+  const sync = () => { $("#portWrap").style.visibility = f.kind.value === "tcp" ? "" : "hidden"; };
+  f.kind.onchange = sync; sync();
+  $("#selAll").onclick = () => f.querySelectorAll("#latSrv input").forEach(i => i.checked = true);
+  $("#selNone").onclick = () => f.querySelectorAll("#latSrv input").forEach(i => i.checked = false);
+  $("#latCancel").onclick = () => { LATM.editing = null; renderLatMgr(); };
+  if (t.id) $("#latDel").onclick = async () => {
+    if (!confirm(`删除“${t.name}”？它的历史延迟数据也会一起删除。`)) return;
+    try { await api(`/api/latency/${t.id}`, {method: "DELETE"}); LATM.editing = null; toast("已删除"); await reloadLatMgr(); }
+    catch (e) { $("#latErr").textContent = e.message; }
+  };
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const body = {name: f.name.value, kind: f.kind.value, host: f.host.value.trim(), port: +f.port.value,
+                  interval: +f.interval.value, servers: [...f.querySelectorAll("#latSrv input:checked")].map(i => +i.value)};
+    try {
+      await api(t.id ? `/api/latency/${t.id}` : "/api/latency", {method: t.id ? "PUT" : "POST", body: JSON.stringify(body)});
+      LATM.editing = null; toast("已保存"); await reloadLatMgr();
+    } catch (err) { $("#latErr").textContent = err.message; }
+  };
+}
+
 /* ---------- 区间统计（全部服务器） ---------- */
 function openRange() {
   CUR = null;
@@ -1048,6 +1313,11 @@ function openSettings() {
       <div id="orderList" class="order"></div>
     </div>
     <div class="card">
+      <h3>延迟监测</h3>
+      <p class="hint" style="margin-bottom:12px">添加 ping 或 TCP 测试目标，选择由哪些服务器来测，在服务器详情的“延迟”分页查看曲线。</p>
+      <button class="btn primary" id="latMgrBtn">管理测试目标</button>
+    </div>
+    <div class="card">
       <h3>刷新间隔</h3>
       <p class="hint" style="margin-bottom:12px">有人打开面板时，Agent 按“实时间隔”上报，页面也按这个间隔刷新；没人看时自动放慢到“空闲间隔”，省流量。保存后 Agent 在下一次上报时自动跟随，新增服务器的安装命令也会带上实时间隔。</p>
       <form id="ivForm">
@@ -1094,6 +1364,7 @@ function openSettings() {
     <p class="hint" style="margin-top:18px">迁移面板时，在新面板还原后，把各台 VPS 上 <code>/etc/vps-traffic/agent.conf</code> 里的 SERVER 改成新地址并重启 Agent；新面板沿用原地址的话，Agent 不用改。</p>`);
 
   $("#addBtn").onclick = openAdd;
+  $("#latMgrBtn").onclick = openLatency;
   $("#nameForm").onsubmit = async e => {
     e.preventDefault();
     try {

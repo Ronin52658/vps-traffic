@@ -190,6 +190,11 @@ let loggedIn = false;
   const IV = {interval: 3, idle_interval: 60, site_name: "VPS 流量", theme: theme0};
 try { loggedIn = Number(localStorage.getItem(LS_KEY) || 0) > Date.now(); } catch (e) {}
 const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.now() + 30 * 86400000)) : localStorage.removeItem(LS_KEY); } catch (e) {} };
+  const LT = [
+    {id: 1, name: "1.1.1.1", kind: "icmp", host: "1.1.1.1", port: 0, interval: 60, base: 3},
+    {id: 2, name: "8.8.8.8", kind: "icmp", host: "8.8.8.8", port: 0, interval: 60, base: 2},
+    {id: 3, name: "HK-IX", kind: "tcp", host: "hkix.example.com", port: 443, interval: 60, base: 32},
+  ];
   const R = (status, obj) => new Response(JSON.stringify(obj), {status, headers: {"Content-Type": "application/json"}});
 
   async function handle(path, method, body, qs) {
@@ -202,6 +207,7 @@ const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.no
     if (path === "/api/logout") { loggedIn = false; keepLogin(false); return R(200, {ok: true}); }
     if (!loggedIn) return R(401, {error: "未登录"});
     tick();
+    LT.forEach(t => { t.servers = t.servers || S.map(x => x.id); });
     if (path === "/api/range") {
       const [start, days] = parseRange(qs, now), end = start + days * D;
       const servers = S.map(s => { let rx = 0, tx = 0; for (const [ts, v] of s.hourly) if (ts >= start && ts < end) { rx += v[0]; tx += v[1]; }
@@ -243,7 +249,25 @@ const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.no
       curCycle(s, now); S.push(s);
       return R(200, {id: s.id, token: s.token});
     }
-    const m = path.match(/^\/api\/servers\/(\d+)(?:\/(daily|hourly|cycles|reset|token|metrics))?$/);
+    // ---- 延迟监测（演示数据：按任务和时间生成的稳定伪随机曲线）
+    if (path === "/api/latency" && method === "GET") return R(200, {tasks: LT, intervals: [30, 60, 120, 300]});
+    if (path === "/api/latency" && method === "POST") {
+      if (!/^[A-Za-z0-9.:-]+$/.test(body.host || "") || /^-/.test(body.host)) return R(400, {error: "目标须为 IP 或域名"});
+      const t = {id: LT.reduce((a, x) => Math.max(a, x.id), 0) + 1, name: body.name || body.host, kind: body.kind, host: body.host,
+                 port: body.kind === "tcp" ? +body.port : 0, interval: +body.interval || 60, servers: body.servers || []};
+      LT.push(t); return R(200, {id: t.id});
+    }
+    if (path === "/api/latency/order" && method === "POST") { LT.sort((a, b) => body.ids.indexOf(a.id) - body.ids.indexOf(b.id)); return R(200, {ok: true}); }
+    let lm = path.match(/^\/api\/latency\/server\/(\d+)$/);
+    if (lm) { LT.forEach(t => { t.servers = t.servers.filter(x => x !== +lm[1]); if (body.tasks.includes(t.id)) t.servers.push(+lm[1]); }); return R(200, {ok: true}); }
+    lm = path.match(/^\/api\/latency\/(\d+)$/);
+    if (lm) {
+      const i = LT.findIndex(t => t.id === +lm[1]); if (i < 0) return R(404, {error: "测试目标不存在"});
+      if (method === "DELETE") LT.splice(i, 1);
+      else Object.assign(LT[i], {name: body.name || body.host, kind: body.kind, host: body.host, port: body.kind === "tcp" ? +body.port : 0, interval: +body.interval, servers: body.servers});
+      return R(200, {ok: true});
+    }
+    const m = path.match(/^\/api\/servers\/(\d+)(?:\/(daily|hourly|cycles|reset|token|metrics|latency))?$/);
     if (!m) return R(404, {error: "not found"});
     const s = S.find(x => x.id === +m[1]), sub = m[2];
     if (!s) return R(404, {error: "服务器不存在"});
@@ -264,6 +288,27 @@ const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.no
       return R(200, out);
     }
     if (sub === "metrics") return R(200, metricsSeries(s, qs.get("range") || "live", now));
+    if (sub === "latency") {
+      const spans = {"1h": H, "6h": 6 * H, "12h": 12 * H, "24h": D, "7d": 7 * D, "30d": 30 * D};
+      const r = qs.get("range") || "1h";
+      let start = now - (spans[r] || H), end = now;
+      if (r === "custom") { start = Math.max(+qs.get("start"), now - 30 * D); end = Math.min(+qs.get("end"), now); }
+      const bucket = Math.max(60, Math.ceil((end - start) / 300 / 60) * 60);
+      const rnd = n => { const x = Math.sin(n * 12.9898) * 43758.5453; return x - Math.floor(x); };
+      const tasks = LT.filter(t => t.servers.includes(s.id)).map(t => {
+        const base = t.base + s.id * 3, pts = [];
+        for (let b = Math.ceil(start / bucket) * bucket; b <= end; b += bucket) {
+          const k = rnd(b / 60 + t.id * 7 + s.id), spike = k > 0.93 ? base * (1 + k * 2) : 0;
+          const loss = k < 0.03 ? 20 : 0;
+          pts.push([b, base + rnd(b + t.id) * base * 0.15 + spike, loss, base * 0.05 + rnd(b * 3) * 2, base * 1.2 + spike, 0]);
+        }
+        const ok = pts.filter(p => p[1] != null);
+        return {id: t.id, name: t.name, kind: t.kind, host: t.host, port: t.port, interval: t.interval, points: pts,
+                stats: {last: ok.length ? ok[ok.length - 1][1] : null, avg: null, loss: pts.reduce((a, p) => a + p[2], 0) / Math.max(1, pts.length),
+                        jitter: pts.reduce((a, p) => a + p[3], 0) / Math.max(1, pts.length), error: false}};
+      });
+      return R(200, {start, end, bucket, tasks});
+    }
     if (sub === "hourly") {
       const a = fromIso(qs.get("date") || iso(now));
       return R(200, Array.from({length: 24}, (_, h) => { const v = s.hourly.get(a + h * H) || [0, 0]; return {hour: h, rx: v[0], tx: v[1]}; }));
