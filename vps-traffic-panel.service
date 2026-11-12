@@ -10,8 +10,11 @@ Environment=VT_LISTEN=0.0.0.0
 Environment=VT_PORT=8080
 Environment=VT_TZ=Asia/Shanghai
 Environment=VT_DB=/var/lib/vps-traffic-panel/traffic.db
-# 用 Docker 里的 Nginx Proxy Manager 反代时，取消下一行注释，面板才能拿到访客和 Agent 的真实 IP
-#Environment=VT_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12
+# 强制 HTTPS：只接受下面这些反代地址转发来的 HTTPS 请求，直接访问 IP:端口 一律拒绝
+Environment=VT_REQUIRE_HTTPS=1
+Environment=VT_PUBLIC_URL=https://traffic.example.com
+# 反代地址：本机 + Docker 网段（Nginx Proxy Manager 跑在 Docker 里时）
+Environment=VT_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12
 # Telegram 告警等敏感设置写在这个文件里（只有 root 能读），不要写在本文件：本文件所有用户都能读
 EnvironmentFile=-/etc/vps-traffic-panel.env
 Restart=always

@@ -8,7 +8,10 @@ VPS 流量监控面板 - 服务端（仅用 Python 标准库，Python 3.9+）
   VT_LISTEN      监听地址，默认 0.0.0.0
   VT_DB          SQLite 路径，默认与本文件同目录的 traffic.db
   VT_TZ          计算日统计与重置点的时区，默认 Asia/Shanghai
-  VT_PUBLIC_URL  面板对外地址（生成安装命令用），例如 https://traffic.example.com
+  VT_PUBLIC_URL  面板对外地址，例如 https://traffic.example.com。设置后只接受 Host 为该域名的请求
+  VT_REQUIRE_HTTPS 默认 1：只接受经信任反代（VT_TRUSTED_PROXIES）转发、且 X-Forwarded-Proto 为 https
+                 的请求，直接用 http://IP:端口 访问一律拒绝（网页和 Agent 上报都是）。
+                 设为 0 可临时关闭（不建议）
   VT_AGENT_REPO / VT_AGENT_COMMIT / VT_AGENT_INSTALL_SHA256
                  覆盖 agent_pin.json：Agent 安装脚本所在的 GitHub 仓库、固定提交和 install.sh 的 SHA256
   VT_TG_TOKEN    Telegram Bot Token（可选，建议写在 /etc/vps-traffic-panel.env，权限 600）
@@ -50,6 +53,9 @@ LISTEN = os.environ.get("VT_LISTEN", "0.0.0.0")
 PORT = int(os.environ.get("VT_PORT", "8080"))
 TZ_NAME = os.environ.get("VT_TZ", "Asia/Shanghai")
 PUBLIC_URL = os.environ.get("VT_PUBLIC_URL", "").rstrip("/")
+REQUIRE_HTTPS = os.environ.get("VT_REQUIRE_HTTPS", "1").strip() != "0"
+PUBLIC_HOST = urllib.parse.urlparse(PUBLIC_URL).netloc.lower() if PUBLIC_URL else ""
+HSTS_MAX_AGE = 31536000         # 浏览器记住一年：之后自动只用 HTTPS 访问该域名
 TG_TOKEN = os.environ.get("VT_TG_TOKEN", "")
 TG_CHAT = os.environ.get("VT_TG_CHAT", "")
 
@@ -1136,12 +1142,38 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def end_headers(self):
+        if self.forwarded_https():
+            self.send_header("Strict-Transport-Security", f"max-age={HSTS_MAX_AGE}")
         # 禁止被别的页面嵌入（防点击劫持）、禁止猜测类型、不外泄来源地址
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         super().end_headers()
+
+    def transport_ok(self):
+        """强制 HTTPS 反代：返回拒绝原因，空字符串表示放行"""
+        if REQUIRE_HTTPS and not self.forwarded_https():
+            if not self.from_proxy():
+                return "面板只能通过 HTTPS 反代访问，不能直接用 IP:端口 访问"
+            return "反代没有使用 HTTPS（X-Forwarded-Proto 不是 https）"
+        if PUBLIC_HOST and (self.headers.get("Host") or "").lower() != PUBLIC_HOST:
+            return f"请使用 {PUBLIC_URL} 访问"
+        return ""
+
+    def reject_transport(self, path, why):
+        if path.startswith("/api/"):
+            return self.send_json(403, {"error": why})
+        link = f'<p><a href="{PUBLIC_URL}/">{PUBLIC_URL}</a></p>' if PUBLIC_URL else ""
+        body = (f'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
+                f'<title>需要 HTTPS</title><body style="font:16px system-ui;padding:40px;max-width:640px">'
+                f'<h2>需要 HTTPS</h2><p>{why}。</p>{link}</body>').encode()
+        self.send_response(403)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def csrf_ok(self):
         """改动类请求必须来自面板自己的网页：带自定义头（跨源页面带不了，除非通过预检，
@@ -1229,13 +1261,13 @@ class Handler(BaseHTTPRequestHandler):
         return real if real else ip
 
     def session_cookie(self, sid=None):
-        secure = "; Secure" if self.forwarded_https() else ""
+        secure = "; Secure" if REQUIRE_HTTPS or self.forwarded_https() else ""
         return f"vt_session={make_session(sid)}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}{secure}"
 
     def base_url(self):
         if PUBLIC_URL:
             return PUBLIC_URL
-        proto = "https" if self.forwarded_https() else "http"
+        proto = "https" if REQUIRE_HTTPS or self.forwarded_https() else "http"
         host = self.headers.get("Host") or ""
         if not HOST_RE.match(host):                 # 只接受正常的主机名/IP[:端口]，防止拼进安装命令
             host = f"127.0.0.1:{PORT}"
@@ -1260,6 +1292,9 @@ class Handler(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         path, qs = u.path, urllib.parse.parse_qs(u.query)
         try:
+            why = self.transport_ok()
+            if why:
+                return self.reject_transport(path, why)
             if method == "GET" and path in STATIC:
                 return self.serve_static(*STATIC[path])
             m = FLAG_RE.match(path)
@@ -1521,6 +1556,11 @@ def main():
     threading.Thread(target=maintenance_loop, daemon=True).start()
     httpd = LimitedServer((LISTEN, PORT), Handler)
     print(f"[start] 面板运行于 http://{LISTEN}:{PORT}  时区 {TZ_NAME}")
+    if REQUIRE_HTTPS:
+        print(f"[start] 强制 HTTPS：只接受来自 {os.environ.get('VT_TRUSTED_PROXIES', '127.0.0.1,::1')} "
+              f"的 HTTPS 反代请求" + (f"，访问地址 {PUBLIC_URL}" if PUBLIC_URL else ""))
+        if PUBLIC_URL and not PUBLIC_URL.startswith("https://"):
+            sys.exit("[error] 已强制 HTTPS，VT_PUBLIC_URL 必须是 https:// 开头")
     httpd.serve_forever()
 
 

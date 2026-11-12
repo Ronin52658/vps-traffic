@@ -1,6 +1,6 @@
 # VPS 流量监控面板
 
-Agent 读取网卡计数和系统状态（CPU、负载、内存、Swap、硬盘、连接数、进程、运行时间，以及系统版本、内核、CPU 型号、虚拟化等配置信息）并推送到面板。有人打开面板时按“实时间隔”（默认 3 秒）上报、页面同步刷新；没人看时自动放慢到“空闲间隔”（默认 60 秒）省流量；面板按自定义周期累计流量，重置时保留历史周期。部署后用 `http://公网IP:端口` 直接访问，需要密码登录。
+Agent 读取网卡计数和系统状态（CPU、负载、内存、Swap、硬盘、连接数、进程、运行时间，以及系统版本、内核、CPU 型号、虚拟化等配置信息）并推送到面板。有人打开面板时按“实时间隔”（默认 3 秒）上报、页面同步刷新；没人看时自动放慢到“空闲间隔”（默认 60 秒）省流量；面板按自定义周期累计流量，重置时保留历史周期。面板强制 HTTPS：只能经反代（如 Nginx Proxy Manager）用 `https://域名` 访问，需要密码登录；直接访问 `http://IP:端口` 会被拒绝，Agent 也必须走 HTTPS 上报。
 
 ## 文件
 
@@ -19,18 +19,22 @@ Agent 读取网卡计数和系统状态（CPU、负载、内存、Swap、硬盘�
 
 ## 部署面板
 
-在面板机器上以 root 运行：
+准备一个域名解析到反代所在的机器，然后在面板机器上以 root 运行：
 
 ```sh
 git clone https://github.com/Ronin52658/vps-traffic.git && cd vps-traffic
-sh install_panel.sh --port 8080
+sh install_panel.sh --domain traffic.example.com --port 8080
 ```
 
-升级：`cd vps-traffic && git pull && sh install_panel.sh`。
+再按下面“配置 HTTPS 反代”在 NPM 里加好域名，用 `https://traffic.example.com` 访问。
 
-结束后会打印访问地址 `http://公网IP:8080` 和随机生成的登录密码。也可以用 `--ask-password` 交互输入自己的密码（至少 8 位，不会留在 shell 历史里），或 `--password 你的密码` 直接指定。
+升级：`cd vps-traffic && git pull && sh install_panel.sh`（域名、端口等沿用原来的设置）。
 
-打不开的话，在系统防火墙和云厂商安全组放行该 TCP 端口。
+结束后会打印访问地址和随机生成的登录密码。也可以用 `--ask-password` 交互输入自己的密码（至少 8 位，不会留在 shell 历史里），或 `--password 你的密码` 直接指定。
+
+其他参数：
+- `--proxy`：信任的反代地址（逗号分隔的 IP 或网段），默认 `127.0.0.1,::1,172.16.0.0/12`，覆盖本机和 Docker 里的 NPM。NPM 在另一台机器上时，填那台机器的 IP。
+- `--listen`：监听地址，默认 `0.0.0.0`（Docker 里的 NPM 需要能连到）。
 
 重新运行 `install_panel.sh` 即可升级，数据库、密码、端口、时区、反代和 Telegram 设置都会保留。从旧版（root 运行、数据库在 `/opt/vps-traffic-panel`）升级时，数据库会自动搬到 `/var/lib/vps-traffic-panel`。卸载：`sh install_panel.sh --uninstall`（数据库保留）。
 
@@ -40,7 +44,7 @@ sh install_panel.sh --port 8080
 - 密码只以 PBKDF2 哈希保存。同一 IP 连续输错 5 次锁定 15 分钟。
 - 登录后在该浏览器保持 30 天，期间有访问会自动续期，关闭浏览器再打开不用重新输入密码。天数可用 `VT_SESSION_DAYS` 调整。
 - 新增服务器、首页排序、面板名称、修改密码、备份还原、退出登录都在首页右上角的“设置”里。
-- 复制命令：用 `http://IP:端口` 访问时浏览器不开放剪贴板接口，面板会自动改用兼容方式复制；仍然失败时会帮你选中命令，手动复制即可。
+- 复制命令：浏览器不允许自动复制时会帮你选中命令，手动复制即可。
 - 在面板“设置”里修改密码，改完后其他设备的登录会失效。
 - 退出登录会让这个会话立即失效，Cookie 即使被复制走也不能再用。
 - 忘记密码：在仓库目录里运行 `sh install_panel.sh --ask-password`（至少 8 位）。
@@ -48,7 +52,8 @@ sh install_panel.sh --port 8080
 - 单个连接 20 秒没有完成请求就断开，同时最多处理 200 个连接，慢速连接拖不垮面板。
 - 页面禁止被其他网站嵌入（防点击劫持）。
 - 登录限流两层：同一 IP 连续输错 5 次锁 15 分钟；所有 IP 合计 10 分钟内失败 30 次，暂停陌生 IP 登录 15 分钟。最近 30 天成功登录过的 IP 不受全局暂停影响，攻击者没法借此把你锁在门外。
-- 用 IP:端口直接访问时走的是 HTTP，密码和 Token 是明文传输。加 HTTPS 见下面“用 Nginx Proxy Manager 反代”。
+- 强制 HTTPS：面板只接受“来自信任反代地址、且 `X-Forwarded-Proto: https`”的请求，否则网页显示“需要 HTTPS”、接口返回 403；Host 也必须是设置的域名。登录 Cookie 只经 HTTPS 发送，并下发 HSTS，浏览器之后自动只用 HTTPS。
+- 紧急情况（例如证书过期进不去）可以在服务文件里把 `VT_REQUIRE_HTTPS=1` 改成 `0` 临时关闭，处理完记得改回来。
 
 ## 面板的权限
 
@@ -59,17 +64,20 @@ sh install_panel.sh --port 8080
 - 不能提权，只保留绑定 1024 以下端口的能力；看不到其他进程；系统调用限制在普通服务范围内
 - 可以用 `systemd-analyze security vps-traffic-panel` 查看沙箱评分
 
-## 用 Nginx Proxy Manager 反代（HTTPS）
+## 配置 HTTPS 反代（Nginx Proxy Manager）
 
-加 HTTPS 后 `http://IP:端口` 仍然可以访问，两者同时存在；想只走域名，再用防火墙关掉这个端口即可。
+1. NPM 里新增 Proxy Host：Domain 填部署时的 `--domain`，Forward 填 `http` + 面板机器的 IP + 端口 8080（NPM 和面板在同一台时，填 Docker 网桥网关地址，如 `172.17.0.1`，用 `docker network inspect` 查看；或这台机器的公网 IP）。
+2. SSL 页签申请 Let's Encrypt 证书，开启 Force SSL（建议也开 HTTP/2、HSTS）。
+3. 用 `https://域名` 登录。打开时看到“需要 HTTPS”，说明请求不是从信任的反代来的：检查 NPM 的来源地址是否在 `--proxy` 列表里（`journalctl -u vps-traffic-panel` 可看到当前的信任列表）。
+4. 建议在防火墙/安全组里关闭 8080 对公网的访问，只让反代连。面板本身也会拒绝非反代的请求，这一步是多一层保护。
 
-1. NPM 里新增 Proxy Host：域名指向面板机器，Forward 填 `http` + 面板机器的 IP + 端口 8080（NPM 和面板在同一台时，填这台机器的公网 IP 就行，也可以填 Docker 网桥网关地址，用 `docker network inspect` 查看），SSL 申请 Let's Encrypt 证书并开启 Force SSL。
-2. 让面板信任 NPM 转发的真实 IP。编辑 `/etc/systemd/system/vps-traffic-panel.service`，取消这一行的注释：
-   `Environment=VT_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12`
-   然后 `systemctl daemon-reload && systemctl restart vps-traffic-panel`。不设置的话，所有访客和 Agent 在面板看来都来自 Docker 的地址，登录限流、IP 显示和国旗识别都会出错。
-3. 用域名登录面板，新增服务器时生成的安装命令会自动变成 `https://域名`。已安装的 Agent 想改走 HTTPS，在 VPS 上重新运行一次新的安装命令即可（Token 不变）。
+面板的登录 Cookie 现在属于域名，不再和同一 IP 上其他端口的面板共用。
 
-改走域名 HTTPS 后，Agent 上报也经过加密。（安装脚本本身从 GitHub 经 HTTPS 下载并校验 SHA256，与面板是否 HTTPS 无关。）
+### 从旧版（IP:端口 直接访问）升级
+
+1. 先在 NPM 里配好域名和证书，再运行 `sh install_panel.sh --domain 你的域名`。
+2. 升级后旧 Agent（配置的是 `http://IP:端口`）上报会被拒绝。Agent 会把这段时间的流量攒着，不会丢。
+3. 用 `https://域名` 登录面板，到每台服务器的“设置”里复制新的安装命令，在 VPS 上重新运行（Token 不变）；Agent 改走 HTTPS 后会把攒下的流量一次补上。
 
 ## 加入 VPS
 
@@ -77,7 +85,7 @@ sh install_panel.sh --port 8080
 
 ```sh
 curl -fsSL --proto '=https' -o /root/vps-traffic-install.sh https://raw.githubusercontent.com/Ronin52658/vps-traffic/<提交>/install.sh
-echo "<install.sh 的 SHA256>  /root/vps-traffic-install.sh" | sha256sum -c - && sh /root/vps-traffic-install.sh --ref <提交> --server http://面板IP:8080 --token <TOKEN> --interval 3
+echo "<install.sh 的 SHA256>  /root/vps-traffic-install.sh" | sha256sum -c - && sh /root/vps-traffic-install.sh --ref <提交> --server 'https://traffic.example.com' --token <TOKEN> --interval 3
 rm -f /root/vps-traffic-install.sh
 ```
 

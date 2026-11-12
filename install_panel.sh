@@ -1,11 +1,13 @@
 #!/bin/sh
-# 面板一键部署 / 升级：在解压后的 vps-traffic 目录里以 root 运行
-#   sh install_panel.sh [--port 8080] [--password 你的密码] [--tz Asia/Shanghai]
+# 面板一键部署 / 升级：在仓库目录里以 root 运行。面板强制 HTTPS，只能经反代（如 Nginx Proxy Manager）访问
+#   sh install_panel.sh --domain traffic.example.com [--port 8080] [--proxy 127.0.0.1,::1,172.16.0.0/12]
+#                       [--listen 0.0.0.0] [--password 你的密码] [--tz Asia/Shanghai]
+#   升级时不用再写 --domain 等参数，沿用原来的设置
 #   sh install_panel.sh --password 新密码       （只想重设密码时也可以这样用）
 #   sh install_panel.sh --ask-password          （交互输入密码，不留在历史记录里）
 #   sh install_panel.sh --uninstall             （保留数据库 /var/lib/vps-traffic-panel）
 set -e
-PORT="" PASSWORD="" TZNAME="" UNINSTALL=0
+PORT="" PASSWORD="" TZNAME="" UNINSTALL=0 DOMAIN="" PROXIES="" LISTEN=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --ask-password)
@@ -13,6 +15,9 @@ while [ $# -gt 0 ]; do
       stty -echo 2>/dev/null; printf '新密码（至少 8 位）：'; read -r PASSWORD; stty echo 2>/dev/null; echo
       shift ;;
     --port) PORT=$2; shift 2 ;;
+    --domain) DOMAIN=$2; shift 2 ;;
+    --proxy) PROXIES=$2; shift 2 ;;
+    --listen) LISTEN=$2; shift 2 ;;
     --password) PASSWORD=$2; shift 2 ;;
     --tz) TZNAME=$2; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
@@ -44,12 +49,31 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' || { e
 if [ -f "$SVC" ]; then
   [ -n "$PORT" ] || PORT=$(sed -n 's/^Environment=VT_PORT=//p' "$SVC" | head -1)
   [ -n "$TZNAME" ] || TZNAME=$(sed -n 's/^Environment=VT_TZ=//p' "$SVC" | head -1)
-  OLD_PROXIES=$(sed -n 's/^Environment=VT_TRUSTED_PROXIES=//p' "$SVC" | head -1)
+  [ -n "$PROXIES" ] || PROXIES=$(sed -n 's/^Environment=VT_TRUSTED_PROXIES=//p' "$SVC" | head -1)
+  [ -n "$LISTEN" ] || LISTEN=$(sed -n 's/^Environment=VT_LISTEN=//p' "$SVC" | head -1)
+  OLD_URL=$(sed -n 's/^Environment=VT_PUBLIC_URL=//p' "$SVC" | head -1)
   OLD_TG_TOKEN=$(sed -n 's/^Environment=VT_TG_TOKEN=//p' "$SVC" | head -1)
   OLD_TG_CHAT=$(sed -n 's/^Environment=VT_TG_CHAT=//p' "$SVC" | head -1)
 fi
 PORT=${PORT:-8080}
 TZNAME=${TZNAME:-Asia/Shanghai}
+PROXIES=${PROXIES:-127.0.0.1,::1,172.16.0.0/12}
+LISTEN=${LISTEN:-0.0.0.0}
+
+# 面板域名：强制 HTTPS 后必须有。升级时沿用原来的；示例值不算
+DOMAIN=${DOMAIN#https://}; DOMAIN=${DOMAIN#http://}; DOMAIN=${DOMAIN%%/*}
+if [ -n "$DOMAIN" ]; then
+  PUBLIC_URL="https://$DOMAIN"
+elif [ -n "$OLD_URL" ] && [ "$OLD_URL" != "https://traffic.example.com" ] && [ "${OLD_URL#https://}" != "$OLD_URL" ]; then
+  PUBLIC_URL=$OLD_URL
+else
+  echo "面板已改为强制 HTTPS，请用 --domain 指定反代用的域名，例如："
+  echo "  sh install_panel.sh --domain traffic.example.com"
+  exit 1
+fi
+printf '%s' "${PUBLIC_URL#https://}" | grep -Eq '^[A-Za-z0-9.-]+(:[0-9]{1,5})?$' || { echo "域名格式不对：$PUBLIC_URL"; exit 1; }
+printf '%s' "$PROXIES" | grep -Eq '^[0-9A-Fa-f.:/,]+$' || { echo "--proxy 格式不对：$PROXIES"; exit 1; }
+printf '%s' "$LISTEN" | grep -Eq '^[0-9A-Fa-f.:]+$' || { echo "--listen 格式不对：$LISTEN"; exit 1; }
 
 # 专用系统用户：没有 shell、没有家目录
 id "$USR" >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$USR"
@@ -88,11 +112,13 @@ if [ ! -f "$ENVF" ]; then
 fi
 chown root:root "$ENVF"; chmod 600 "$ENVF"
 
-# systemd 服务：按模板生成，保留原来的端口、时区和反代设置
+# systemd 服务：按模板生成，保留原来的端口、时区、域名和反代设置
 sed -e "s/^Environment=VT_PORT=.*/Environment=VT_PORT=$PORT/" \
     -e "s#^Environment=VT_TZ=.*#Environment=VT_TZ=$TZNAME#" \
+    -e "s#^Environment=VT_LISTEN=.*#Environment=VT_LISTEN=$LISTEN#" \
+    -e "s#^Environment=VT_PUBLIC_URL=.*#Environment=VT_PUBLIC_URL=$PUBLIC_URL#" \
+    -e "s#^Environment=VT_TRUSTED_PROXIES=.*#Environment=VT_TRUSTED_PROXIES=$PROXIES#" \
     "$SRC/vps-traffic-panel.service" > "$SVC"
-[ -n "$OLD_PROXIES" ] && sed -i "s#^\#Environment=VT_TRUSTED_PROXIES=.*#Environment=VT_TRUSTED_PROXIES=$OLD_PROXIES#" "$SVC"
 chmod 644 "$SVC"
 
 # 密码：以面板用户身份写入，保证数据库文件归属正确
@@ -111,10 +137,9 @@ systemctl restart vps-traffic-panel
 sleep 2
 state=$(systemctl is-active vps-traffic-panel || true)
 
-IP=$(curl -4 -fsS -m 5 https://api.ipify.org 2>/dev/null || curl -4 -fsS -m 5 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 echo
 echo "部署完成，状态：$state（以 $USR 用户 + 只读沙箱运行）"
-echo "访问地址：http://$IP:$PORT"
+echo "访问地址：$PUBLIC_URL（强制 HTTPS，直接访问 IP:$PORT 会被拒绝）"
 if [ -n "$PASSWORD" ]; then echo "登录密码：$PASSWORD"; else echo "登录密码：沿用原来的密码"; fi
 echo "数据目录：$DATA"
 if [ "$state" != "active" ]; then
@@ -122,4 +147,6 @@ if [ "$state" != "active" ]; then
   journalctl -u vps-traffic-panel -n 30 --no-pager 2>/dev/null || true
 fi
 echo
-echo "如果打不开，请在防火墙和云厂商安全组放行 TCP $PORT 端口。"
+echo "反代设置（Nginx Proxy Manager）：域名 ${PUBLIC_URL#https://} → http://<这台机器的 IP>:$PORT，"
+echo "  申请 Let's Encrypt 证书并开启 Force SSL。反代来源须在信任列表内：$PROXIES"
+echo "建议在防火墙/安全组里不要对公网开放 TCP $PORT（只让反代访问）。"
