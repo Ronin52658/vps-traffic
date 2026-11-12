@@ -12,8 +12,8 @@ Environment=VT_TZ=Asia/Shanghai
 Environment=VT_DB=/var/lib/vps-traffic-panel/traffic.db
 # 用 Docker 里的 Nginx Proxy Manager 反代时，取消下一行注释，面板才能拿到访客和 Agent 的真实 IP
 #Environment=VT_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12
-#Environment=VT_TG_TOKEN=
-#Environment=VT_TG_CHAT=
+# Telegram 告警等敏感设置写在这个文件里（只有 root 能读），不要写在本文件：本文件所有用户都能读
+EnvironmentFile=-/etc/vps-traffic-panel.env
 Restart=always
 RestartSec=3
 

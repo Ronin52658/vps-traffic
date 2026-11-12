@@ -2,11 +2,16 @@
 # 面板一键部署 / 升级：在解压后的 vps-traffic 目录里以 root 运行
 #   sh install_panel.sh [--port 8080] [--password 你的密码] [--tz Asia/Shanghai]
 #   sh install_panel.sh --password 新密码       （只想重设密码时也可以这样用）
+#   sh install_panel.sh --ask-password          （交互输入密码，不留在历史记录里）
 #   sh install_panel.sh --uninstall             （保留数据库 /var/lib/vps-traffic-panel）
 set -e
 PORT="" PASSWORD="" TZNAME="" UNINSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --ask-password)
+      # 交互输入密码，不会留在 shell 历史和进程列表里
+      stty -echo 2>/dev/null; printf '新密码（至少 8 位）：'; read -r PASSWORD; stty echo 2>/dev/null; echo
+      shift ;;
     --port) PORT=$2; shift 2 ;;
     --password) PASSWORD=$2; shift 2 ;;
     --tz) TZNAME=$2; shift 2 ;;
@@ -72,17 +77,27 @@ fi
 chown -R "$USR:$USR" "$DATA"
 chmod 700 "$DATA"
 
-# systemd 服务：按模板生成，保留原来的端口、时区、反代和 Telegram 设置
+# 敏感设置（Telegram）放在只有 root 能读的环境文件；旧版写在服务文件里的值自动搬过来
+ENVF=/etc/vps-traffic-panel.env
+if [ ! -f "$ENVF" ]; then
+  ( umask 077
+    { echo "# 面板的敏感设置，只有 root 能读；改完 systemctl restart vps-traffic-panel"
+      echo "VT_TG_TOKEN=$OLD_TG_TOKEN"
+      echo "VT_TG_CHAT=$OLD_TG_CHAT"; } > "$ENVF" )
+  [ -n "$OLD_TG_TOKEN" ] && echo "已把 Telegram 设置从服务文件移到 $ENVF"
+fi
+chown root:root "$ENVF"; chmod 600 "$ENVF"
+
+# systemd 服务：按模板生成，保留原来的端口、时区和反代设置
 sed -e "s/^Environment=VT_PORT=.*/Environment=VT_PORT=$PORT/" \
     -e "s#^Environment=VT_TZ=.*#Environment=VT_TZ=$TZNAME#" \
     "$SRC/vps-traffic-panel.service" > "$SVC"
 [ -n "$OLD_PROXIES" ] && sed -i "s#^\#Environment=VT_TRUSTED_PROXIES=.*#Environment=VT_TRUSTED_PROXIES=$OLD_PROXIES#" "$SVC"
-[ -n "$OLD_TG_TOKEN" ] && sed -i "s#^\#Environment=VT_TG_TOKEN=.*#Environment=VT_TG_TOKEN=$OLD_TG_TOKEN#" "$SVC"
-[ -n "$OLD_TG_CHAT" ] && sed -i "s#^\#Environment=VT_TG_CHAT=.*#Environment=VT_TG_CHAT=$OLD_TG_CHAT#" "$SVC"
 chmod 644 "$SVC"
 
 # 密码：以面板用户身份写入，保证数据库文件归属正确
-setpw() { runuser -u "$USR" -- env VT_DB="$DATA/traffic.db" python3 "$DIR/server.py" --set-password "$1" >/dev/null; }
+# 密码经标准输入传给 server.py，不出现在进程列表里
+setpw() { printf '%s\n' "$1" | runuser -u "$USR" -- env VT_DB="$DATA/traffic.db" python3 "$DIR/server.py" --set-password - >/dev/null; }
 if [ -n "$PASSWORD" ]; then
   setpw "$PASSWORD"
 elif [ ! -f "$DATA/traffic.db" ]; then

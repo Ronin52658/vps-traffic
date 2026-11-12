@@ -33,15 +33,22 @@ read_counters() {
   }' /proc/net/dev
 }
 
+# Token 不放进命令行参数（本机任何用户都能用 ps 看到），改从标准输入或私有配置文件交给 curl/wget
+case "$TOKEN" in *[!A-Za-z0-9_-]*) echo "TOKEN 含非法字符" >&2; exit 1 ;; esac
+if ! command -v curl >/dev/null 2>&1; then
+  WGETRC="$STATE_DIR/wgetrc"
+  ( umask 077; printf 'header = Authorization: Bearer %s\n' "$TOKEN" > "$WGETRC" )
+  export WGETRC
+fi
+
 # 上报成功时输出面板的回应（含面板设定的刷新间隔）
 post() {
   if command -v curl >/dev/null 2>&1; then
-    curl -fsS -m 15 -X POST \
-      -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-      -d "$1" "$SERVER/api/report" 2>/dev/null
+    printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" |
+      curl -fsS -m 15 -K - -X POST -H "Content-Type: application/json" \
+        -d "$1" "$SERVER/api/report" 2>/dev/null
   else
-    wget -q -T 15 -O - \
-      --header="Authorization: Bearer $TOKEN" --header="Content-Type: application/json" \
+    wget -q -T 15 -O - --header="Content-Type: application/json" \
       --post-data="$1" "$SERVER/api/report" 2>/dev/null
   fi
 }
@@ -56,7 +63,8 @@ clean() { printf '%s' "$1" | tr -d '"\\' | tr -d '\000-\037' | cut -c1-120; }
 sys_json() {
   set -- $(read_cpu)
   if [ -n "$cpu_t" ] && [ "$1" -gt "$cpu_t" ]; then
-    cpu=$(awk -v a=$(($1 - cpu_t)) -v b=$(($2 - cpu_i)) 'BEGIN{printf "%.1f", 100*(a-b)/a}')
+    # iowait 计数偶尔倒退，结果夹到 0–100
+    cpu=$(awk -v a=$(($1 - cpu_t)) -v b=$(($2 - cpu_i)) 'BEGIN{v=100*(a-b)/a; if(v<0)v=0; if(v>100)v=100; printf "%.1f", v}')
   else
     cpu=0
   fi
@@ -124,7 +132,7 @@ while :; do
     if [ -z "$info_at" ] || [ $((up - info_at)) -ge 600 ] || [ "$up" -lt "$info_at" ]; then
       info=",\"info\":$(info_json)"; info_at=$up
     fi
-    body=$(printf '{"rx":%s,"tx":%s,"iface":"%s","hostname":"%s","sys":%s%s}' "$pend_rx" "$pend_tx" "$ifc" "$HOST" "$sys" "$info")
+    body=$(printf '{"rx":%s,"tx":%s,"iface":"%s","hostname":"%s","sys":%s%s}' "$pend_rx" "$pend_tx" "$(clean "$ifc")" "$HOST" "$sys" "$info")
     if resp=$(post "$body"); then
       pend_rx=0 pend_tx=0
       # 跟随面板“设置”里的刷新间隔（只接受 1–300 秒）

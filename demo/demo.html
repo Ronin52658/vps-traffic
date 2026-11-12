@@ -605,7 +605,7 @@ let DRANGE = null;   // 详情页区间 {start, end}
 let GRANGE = null;   // 区间统计 {start, end}
 
 async function api(path, opt = {}) {
-  const r = await fetch(path, {credentials:"same-origin", headers:{"Content-Type":"application/json"}, ...opt});
+  const r = await fetch(path, {credentials:"same-origin", headers:{"Content-Type":"application/json", "X-VT-Request":"1"}, ...opt});
   if (r.status === 401 && path !== "/api/login" && path !== "/api/password") { showLogin(); throw new Error("未登录"); }
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || r.statusText);
@@ -880,7 +880,7 @@ function monitorInfo(s) {
     ["IP", s.ip], ["运行时间", y ? durText(y.uptime) : ""], ["主机名", s.hostname], ["网卡", s.iface],
   ];
   const nowItems = [
-    ["CPU", y ? `${y.cpu.toFixed(1)}%` : ""],
+    ["CPU", y && y.cpu != null ? `${y.cpu.toFixed(1)}%` : ""],
     ["负载", y ? y.load.map(v => v == null ? "-" : v.toFixed(2)).join(" / ") : ""],
     ["内存", y ? `${fb(y.mem_used)} / ${fb(y.mem_total)}（${pctOf(y.mem_used, y.mem_total).toFixed(1)}%）` : ""],
     ["Swap", y ? (y.swap_total ? `${fb(y.swap_used)} / ${fb(y.swap_total)}` : "未启用") : ""],
@@ -1153,7 +1153,7 @@ function installCmd(token) {
   const f = "/root/vps-traffic-install.sh";
   return [
     `curl -fsSL --proto '=https' -o ${f} https://raw.githubusercontent.com/${a.repo}/${a.commit}/install.sh`,
-    `echo "${a.install_sha256}  ${f}" | sha256sum -c - && sh ${f} --ref ${a.commit} --server ${b} --token ${token} --interval ${META.interval || 3}`,
+    `echo "${a.install_sha256}  ${f}" | sha256sum -c - && sh ${f} --ref ${a.commit} --server '${b}' --token ${token} --interval ${META.interval || 3}`,
     `rm -f ${f}`,
   ].join("\n");
 }
@@ -1425,7 +1425,7 @@ function openSettings() {
     btn.disabled = true; btn.textContent = "还原中…"; $("#restoreErr").textContent = "";
     try {
       const r = await fetch("/api/restore", {method: "POST", credentials: "same-origin",
-        headers: {"Content-Type": "application/octet-stream"}, body: f});
+        headers: {"Content-Type": "application/octet-stream", "X-VT-Request": "1"}, body: f});
       const j = await r.json().catch(() => ({}));
       if (r.status === 401) return showLogin();
       if (!r.ok) throw new Error(j.error || r.statusText);

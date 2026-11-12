@@ -28,7 +28,7 @@ sh install_panel.sh --port 8080
 
 升级：`cd vps-traffic && git pull && sh install_panel.sh`。
 
-结束后会打印访问地址 `http://公网IP:8080` 和随机生成的登录密码。也可以用 `--password 你的密码` 自己指定（至少 8 位）。
+结束后会打印访问地址 `http://公网IP:8080` 和随机生成的登录密码。也可以用 `--ask-password` 交互输入自己的密码（至少 8 位，不会留在 shell 历史里），或 `--password 你的密码` 直接指定。
 
 打不开的话，在系统防火墙和云厂商安全组放行该 TCP 端口。
 
@@ -42,7 +42,11 @@ sh install_panel.sh --port 8080
 - 新增服务器、首页排序、面板名称、修改密码、备份还原、退出登录都在首页右上角的“设置”里。
 - 复制命令：用 `http://IP:端口` 访问时浏览器不开放剪贴板接口，面板会自动改用兼容方式复制；仍然失败时会帮你选中命令，手动复制即可。
 - 在面板“设置”里修改密码，改完后其他设备的登录会失效。
-- 忘记密码：在解压目录里运行 `sh install_panel.sh --password 新密码`（至少 8 位）。
+- 退出登录会让这个会话立即失效，Cookie 即使被复制走也不能再用。
+- 忘记密码：在仓库目录里运行 `sh install_panel.sh --ask-password`（至少 8 位）。
+- 防跨站请求伪造：所有改动类请求必须由面板自己的网页发出（带专用请求头且 Origin 与地址一致），同一 IP 上其他端口的网页也无法冒用你的登录。
+- 单个连接 20 秒没有完成请求就断开，同时最多处理 200 个连接，慢速连接拖不垮面板。
+- 页面禁止被其他网站嵌入（防点击劫持）。
 - 登录限流两层：同一 IP 连续输错 5 次锁 15 分钟；所有 IP 合计 10 分钟内失败 30 次，暂停陌生 IP 登录 15 分钟。最近 30 天成功登录过的 IP 不受全局暂停影响，攻击者没法借此把你锁在门外。
 - 用 IP:端口直接访问时走的是 HTTP，密码和 Token 是明文传输。加 HTTPS 见下面“用 Nginx Proxy Manager 反代”。
 
@@ -112,6 +116,7 @@ Agent 由 systemd 以临时普通用户（`DynamicUser`）运行，不是 root�
 - 不能提权、没有任何 capability、不能加载内核模块、不能改系统时间和主机名
 - 只能使用 IPv4/IPv6、本地 socket 和读路由表，系统调用限制在普通服务的范围内
 - 配置文件 `/etc/vps-traffic/agent.conf`（含 Token）只有 root 能读，由 systemd 读取后以环境变量交给 Agent
+- 上报时 Token 经标准输入交给 curl，不出现在命令行参数里，本机其他用户用 `ps` 看不到
 
 可以用 `systemd-analyze security vps-traffic-agent` 查看沙箱评分。
 
@@ -153,13 +158,15 @@ Agent 由 systemd 以临时普通用户（`DynamicUser`）运行，不是 root�
 在“设置”里：
 
 - 下载备份：一个 `.db` 文件，包含所有服务器设置、Agent Token、周期历史与小时明细。内含 Token，请妥善保管。
-- 从备份还原：先验证文件（格式、完整性、表结构），再完全替换当前数据。还原前自动保存 `traffic.db.before-restore-时间`（保留最近 5 份）；当前登录密码不变。
+- 从备份还原：先验证文件（格式、完整性、表结构），再完全替换当前数据。还原前自动保存 `traffic.db.before-restore-时间`（保留最近 5 份）；当前登录密码、会话密钥和登录白名单不变；备份里的触发器和视图一律删除，被人改过的备份文件也无法借还原篡改密码。
 
 迁移面板：旧面板下载备份 → 新面板还原 → 各台 VPS 把 `/etc/vps-traffic/agent.conf` 的 `SERVER` 改成新地址后 `systemctl restart vps-traffic-agent`。
 
 ## Telegram 告警（可选）
 
-在 `/etc/systemd/system/vps-traffic-panel.service` 里填上 `VT_TG_TOKEN` 和 `VT_TG_CHAT`，然后 `systemctl daemon-reload && systemctl restart vps-traffic-panel`。用量到 80%、95%、100% 时各提醒一次。
+在 `/etc/vps-traffic-panel.env`（权限 600，只有 root 能读）里填上 `VT_TG_TOKEN` 和 `VT_TG_CHAT`，然后 `systemctl restart vps-traffic-panel`。不要写在服务文件里：服务文件所有用户都能读。旧版写在服务文件里的设置，升级时会自动搬过去。
+
+用量到 80%、95%、100% 时各提醒一次；周期中途调高额度后，按新额度重新计算提醒。
 
 ## 数据保留
 

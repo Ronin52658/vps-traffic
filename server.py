@@ -11,7 +11,7 @@ VPS 流量监控面板 - 服务端（仅用 Python 标准库，Python 3.9+）
   VT_PUBLIC_URL  面板对外地址（生成安装命令用），例如 https://traffic.example.com
   VT_AGENT_REPO / VT_AGENT_COMMIT / VT_AGENT_INSTALL_SHA256
                  覆盖 agent_pin.json：Agent 安装脚本所在的 GitHub 仓库、固定提交和 install.sh 的 SHA256
-  VT_TG_TOKEN    Telegram Bot Token（可选）
+  VT_TG_TOKEN    Telegram Bot Token（可选，建议写在 /etc/vps-traffic-panel.env，权限 600）
   VT_TG_CHAT     Telegram Chat ID（可选）
   VT_SESSION_DAYS 登录保持天数，默认 30；期间每天首次访问会自动续期
   VT_TRUSTED_PROXIES 信任的反代地址（逗号分隔的 IP 或网段），只有来自这些地址的请求才读取
@@ -20,6 +20,7 @@ VPS 流量监控面板 - 服务端（仅用 Python 标准库，Python 3.9+）
 
 命令行：
   python3 server.py --set-password 新密码   重设面板密码（之后重启服务）
+  python3 server.py --set-password -       从标准输入读取新密码（不会出现在进程列表里）
 """
 import calendar
 import collections
@@ -65,6 +66,13 @@ LOGIN_LOCK_SEC = 900            # 锁定 15 分钟
 GLOBAL_FAIL_WINDOW = 600        # 全局限流：10 分钟内
 GLOBAL_FAIL_MAX = 30            # 所有 IP 合计失败这么多次，就暂停陌生 IP 的登录
 GLOBAL_LOCK_SEC = 900           # 暂停 15 分钟；最近成功登录过的 IP 不受影响
+MAX_CONNECTIONS = 200           # 同时处理的连接上限，超出的直接断开
+REQUEST_TIMEOUT = 20            # 单个连接读写超时（秒），防止慢速连接占满线程
+MAX_FAIL_ENTRIES = 10000        # 登录失败记录上限，防止内存无限增长
+CSRF_HEADER = "X-VT-Request"    # 网页发出的改动请求必须带这个头，跨源页面无法伪造
+# 还原备份时，这些设置沿用当前面板的值，不从备份里读（备份可能被人改过）
+SECURITY_SETTINGS = ("secret", "password_hash", "revoked_sessions", "login_ips")
+RESTORABLE_SETTINGS = ("interval", "idle_interval", "site_name", "theme")
 
 
 def _parse_proxies(v):
@@ -142,6 +150,7 @@ def db():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")   # WAL 下安全且快，适合每几秒一次的上报
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA trusted_schema=OFF")
     return conn
 
 
@@ -264,6 +273,7 @@ def init_db():
                 print(f"[init] 已生成面板密码：{pw}")
         conn.execute("DELETE FROM settings WHERE k='password'")
     load_interval()
+    load_revoked()
 
 
 def _clamp(v, default):
@@ -337,6 +347,9 @@ def set_password(new_pw):
         set_setting(conn, "password_hash", hash_pw(new_pw))
         SECRET = secrets.token_hex(32)
         set_setting(conn, "secret", SECRET)
+        set_setting(conn, "revoked_sessions", "{}")     # 换了密钥，旧会话本来就全部失效
+    with _REVOKED_LOCK:
+        _REVOKED.clear()
 
 
 def check_password(pw):
@@ -383,6 +396,10 @@ def login_locked(ip):
 def login_failed(ip):
     now = time.time()
     with _FAILS_LOCK:
+        if ip not in _FAILS and len(_FAILS) >= MAX_FAIL_ENTRIES:
+            prune_fails(now)
+            if len(_FAILS) >= MAX_FAIL_ENTRIES:              # 仍然满：丢掉最早的一条
+                _FAILS.pop(min(_FAILS, key=lambda k: _FAILS[k][1]))
         r = _FAILS.setdefault(ip, [0, now, 0])
         if now - r[1] > LOGIN_LOCK_SEC:
             r[:] = [0, now, 0]
@@ -400,6 +417,12 @@ def login_failed(ip):
             _GLOBAL_FAILS.clear()
             print(f"[auth] {GLOBAL_FAIL_WINDOW // 60} 分钟内登录失败 {GLOBAL_FAIL_MAX} 次，"
                   f"暂停陌生 IP 登录 {GLOBAL_LOCK_SEC // 60} 分钟")
+
+
+def prune_fails(now):
+    """清掉已经过期的失败记录（调用方持有 _FAILS_LOCK）"""
+    for k in [k for k, r in _FAILS.items() if r[2] < now and now - r[1] > LOGIN_LOCK_SEC]:
+        del _FAILS[k]
 
 
 def login_ok(ip):
@@ -569,6 +592,12 @@ def _num(v, lo=0.0, hi=1e18):
     return f if lo <= f <= hi and f == f else None
 
 
+def _clamp_pct(v):
+    """CPU 百分比：iowait 计数偶尔倒退会算出 <0 或 >100，夹到 0–100 而不是丢弃"""
+    f = _num(v, -1e6, 1e6)
+    return None if f is None else min(100.0, max(0.0, f))
+
+
 def parse_sys(d):
     """校验 Agent 送来的系统指标；格式不对的字段丢弃"""
     if not isinstance(d, dict):
@@ -578,7 +607,7 @@ def parse_sys(d):
     disk = d.get("disk") if isinstance(d.get("disk"), list) else []
     g = lambda arr, i: _num(arr[i]) if len(arr) > i else None
     out = {
-        "cpu": _num(d.get("cpu"), 0, 100),
+        "cpu": _clamp_pct(d.get("cpu")),
         "load": [g(load, i) for i in range(3)],
         "mem_total": g(mem, 0), "mem_used": g(mem, 1), "swap_total": g(mem, 2), "swap_used": g(mem, 3),
         "disk_total": g(disk, 0), "disk_used": g(disk, 1),
@@ -597,13 +626,14 @@ _GEO_FAIL = {}          # ip -> 下次可重试的时间
 
 
 def _geo_query(ip):
-    """依次尝试两个免费接口，返回两位国家代码或空字符串"""
-    urls = (f"https://ipinfo.io/{ip}/country", f"http://ip-api.com/line/{ip}?fields=countryCode")
-    for url in urls:
+    """依次尝试两个免费接口（都走 HTTPS），返回两位国家代码或空字符串"""
+    for url, is_json in ((f"https://ipinfo.io/{ip}/country", False), (f"https://api.country.is/{ip}", True)):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "vps-traffic-panel"})
             with urllib.request.urlopen(req, timeout=6) as r:
-                cc = r.read(16).decode("ascii", "ignore").strip().upper()
+                raw = r.read(512).decode("ascii", "ignore")
+            cc = (json.loads(raw).get("country") or "") if is_json else raw
+            cc = str(cc).strip().upper()
             if re.fullmatch(r"[A-Z]{2}", cc):
                 return cc
         except Exception:
@@ -869,8 +899,15 @@ def apply_rule_change(conn, sid, now):
     """规则变更后：当前周期保留起点，按新规则重算结束点"""
     srv = conn.execute("SELECT * FROM servers WHERE id=?", (sid,)).fetchone()
     cyc = ensure_cycle(conn, srv, now)
-    conn.execute("UPDATE cycles SET end_ts=?, quota_gb=?, billing=? WHERE id=?",
-                 (next_boundary(srv, now), srv["quota_gb"], srv["billing"], cyc["id"]))
+    # 额度或计费方式改了：告警等级按新额度重算，调高额度后到 80%/95%/100% 仍会提醒
+    level = cyc["alert_level"]
+    if srv["quota_gb"] > 0:
+        pct = billed(cyc["rx"], cyc["tx"], srv["billing"]) / (srv["quota_gb"] * 1024 ** 3) * 100
+        level = min(level, max([lv for lv in ALERT_LEVELS if pct >= lv], default=0))
+    else:
+        level = 0
+    conn.execute("UPDATE cycles SET end_ts=?, quota_gb=?, billing=?, alert_level=? WHERE id=?",
+                 (next_boundary(srv, now), srv["quota_gb"], srv["billing"], level, cyc["id"]))
     ensure_cycle(conn, srv, now)
 
 
@@ -890,6 +927,11 @@ def maintenance_loop():
                     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                     conn.execute("PRAGMA optimize")
                 last_ckpt = now
+            with _FAILS_LOCK:
+                prune_fails(time.time())
+            for ip in [ip for ip, t in list(_GEO_FAIL.items()) if t < time.time()]:
+                _GEO_FAIL.pop(ip, None)
+            prune_revoked()
         except Exception as e:
             print(f"[maint] {e}")
         time.sleep(60)
@@ -935,7 +977,11 @@ def validate_backup(path):
     try:
         if c.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise ValueError("备份文件已损坏（完整性检查未通过）")
+        c.execute("PRAGMA trusted_schema=OFF")
+        kinds = dict(c.execute("SELECT name, type FROM sqlite_master"))
         for table, cols in REQUIRED_TABLES.items():
+            if kinds.get(table) != "table":
+                raise ValueError(f"缺少数据表 {table}，这不是本面板的备份")
             have = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
             if not have:
                 raise ValueError(f"缺少数据表 {table}，这不是本面板的备份")
@@ -970,7 +1016,7 @@ def restore_backup(upload_path):
     with DB_LOCK:
         live = db()
         try:
-            current_hash = get_setting(live, "password_hash")
+            keep = {k: get_setting(live, k) for k in SECURITY_SETTINGS}
             copy_db(live, safety)
             src = sqlite3.connect(upload_path)
             try:
@@ -978,10 +1024,21 @@ def restore_backup(upload_path):
             finally:
                 src.close()
             live.execute("PRAGMA journal_mode=WAL")
+            # 备份里的触发器和视图一律删除：触发器能在下面写回密码时把它改掉
+            for name, kind in live.execute(
+                    "SELECT name, type FROM sqlite_master WHERE type IN ('trigger','view')").fetchall():
+                live.execute(f'DROP {kind.upper()} IF EXISTS "{name.replace(chr(34), chr(34) * 2)}"')
             migrate(live)                       # 旧版本备份缺的表、字段或索引补上
-            set_setting(live, "secret", SECRET)
-            set_setting(live, "password_hash", current_hash)
-            live.execute("DELETE FROM settings WHERE k='password'")
+            # 只保留可以从备份恢复的普通设置；密码、会话密钥、登录白名单沿用当前面板
+            ph = ",".join("?" * len(RESTORABLE_SETTINGS))
+            live.execute(f"DELETE FROM settings WHERE k NOT IN ({ph})", RESTORABLE_SETTINGS)
+            keep["secret"] = SECRET
+            for k, v in keep.items():
+                if v is not None:
+                    set_setting(live, k, v)
+            left = live.execute("SELECT COUNT(*) FROM sqlite_master WHERE type IN ('trigger','view')").fetchone()[0]
+            if left:
+                raise RuntimeError("还原后仍有触发器或视图")
             live.commit()
         finally:
             live.close()
@@ -993,22 +1050,70 @@ def restore_backup(upload_path):
 
 # ---------------------------------------------------------------- 认证
 
-def make_session():
+# 会话 Cookie：过期时间.会话ID.签名。续期时会话ID不变，退出登录时把会话ID记入吊销表，
+# 这样退出后旧 Cookie（包括被偷走的副本）立即失效，续期也续不回来
+_REVOKED = {}            # 会话ID -> 吊销记录保留到的时间
+_REVOKED_LOCK = threading.Lock()
+
+
+def _sign(exp, sid):
+    return hmac.new(SECRET.encode(), f"{exp}.{sid}".encode(), hashlib.sha256).hexdigest()
+
+
+def make_session(sid=None):
+    sid = sid or secrets.token_hex(12)
     exp = int(time.time()) + SESSION_TTL
-    sig = hmac.new(SECRET.encode(), str(exp).encode(), hashlib.sha256).hexdigest()
-    return f"{exp}.{sig}"
+    return f"{exp}.{sid}.{_sign(exp, sid)}"
 
 
-def check_session(val):
-    """有效时返回过期时间戳，无效返回 0"""
+def parse_session(val):
+    """有效时返回 (过期时间戳, 会话ID)，无效返回 None"""
     try:
-        exp, sig = val.split(".", 1)
-        good = hmac.new(SECRET.encode(), exp.encode(), hashlib.sha256).hexdigest()
-        if hmac.compare_digest(sig, good) and int(exp) > time.time():
-            return int(exp)
+        exp, sid, sig = val.split(".")
+        if not re.fullmatch(r"[0-9a-f]{24}", sid):
+            return None
+        if hmac.compare_digest(sig, _sign(exp, sid)) and int(exp) > time.time():
+            with _REVOKED_LOCK:
+                if sid in _REVOKED:
+                    return None
+            return int(exp), sid
     except Exception:
         pass
-    return 0
+    return None
+
+
+def load_revoked():
+    with txn() as conn:
+        try:
+            d = json.loads(get_setting(conn, "revoked_sessions") or "{}")
+        except ValueError:
+            d = {}
+    with _REVOKED_LOCK:
+        _REVOKED.clear()
+        _REVOKED.update({k: v for k, v in d.items() if isinstance(v, (int, float))})
+
+
+def _save_revoked():
+    with _REVOKED_LOCK:
+        data = json.dumps(_REVOKED)
+    with txn() as conn:
+        set_setting(conn, "revoked_sessions", data)
+
+
+def revoke_session(sid):
+    with _REVOKED_LOCK:
+        _REVOKED[sid] = int(time.time()) + SESSION_TTL + 86400
+    _save_revoked()
+
+
+def prune_revoked():
+    now = time.time()
+    with _REVOKED_LOCK:
+        old = [k for k, v in _REVOKED.items() if v < now]
+        for k in old:
+            del _REVOKED[k]
+    if old:
+        _save_revoked()
 
 
 # ---------------------------------------------------------------- HTTP
@@ -1020,11 +1125,33 @@ STATIC = {"/": ("index.html", "text/html; charset=utf-8")}   # Agent 脚本改�
 ROUTE_SRV = re.compile(r"^/api/servers/(\d+)(?:/(daily|hourly|cycles|reset|token|metrics))?$")
 
 
+HOST_RE = re.compile(r"^[A-Za-z0-9.-]+(:[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]+\](:[0-9]{1,5})?$")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "VPSTraffic/1.0"
+    timeout = REQUEST_TIMEOUT            # 慢速连接（只发半个请求）超时后断开
 
     def log_message(self, fmt, *args):
         pass
+
+    def end_headers(self):
+        # 禁止被别的页面嵌入（防点击劫持）、禁止猜测类型、不外泄来源地址
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        super().end_headers()
+
+    def csrf_ok(self):
+        """改动类请求必须来自面板自己的网页：带自定义头（跨源页面带不了，除非通过预检，
+        而面板不响应预检），且 Origin（浏览器会带）必须与 Host 一致"""
+        if self.headers.get(CSRF_HEADER) != "1":
+            return False
+        origin = self.headers.get("Origin")
+        if origin:
+            return urllib.parse.urlparse(origin).netloc.lower() == (self.headers.get("Host") or "").lower()
+        return True
 
     # ---- helpers
     def send_json(self, code, obj, headers=None):
@@ -1035,7 +1162,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         headers = dict(headers or {})
         if getattr(self, "_renew", False) and "Set-Cookie" not in headers:
-            headers["Set-Cookie"] = self.session_cookie()
+            headers["Set-Cookie"] = self.session_cookie(getattr(self, "_sid", None))
             self._renew = False
         for k, v in headers.items():
             self.send_header(k, v)
@@ -1049,13 +1176,22 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b"{}"
         return json.loads(raw or b"{}")
 
+    def session(self):
+        try:
+            c = SimpleCookie(self.headers.get("Cookie", ""))
+        except Exception:
+            return None
+        return parse_session(c["vt_session"].value) if "vt_session" in c else None
+
     def authed(self):
-        c = SimpleCookie(self.headers.get("Cookie", ""))
-        exp = check_session(c["vt_session"].value) if "vt_session" in c else 0
-        # 滑动续期：签发超过一天就换一张新的，长期有访问就一直保持登录
-        if exp and exp - time.time() < SESSION_TTL - 86400:
+        s = self.session()
+        if not s:
+            return False
+        self._sid = s[1]
+        # 滑动续期：签发超过一天就换一张新的（会话ID不变），长期有访问就一直保持登录
+        if s[0] - time.time() < SESSION_TTL - 86400:
             self._renew = True
-        return bool(exp)
+        return True
 
     def from_proxy(self):
         v = self.client_address[0]
@@ -1092,15 +1228,18 @@ class Handler(BaseHTTPRequestHandler):
         real = norm(self.headers.get("X-Real-IP", ""))
         return real if real else ip
 
-    def session_cookie(self):
+    def session_cookie(self, sid=None):
         secure = "; Secure" if self.forwarded_https() else ""
-        return f"vt_session={make_session()}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL}{secure}"
+        return f"vt_session={make_session(sid)}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}{secure}"
 
     def base_url(self):
         if PUBLIC_URL:
             return PUBLIC_URL
         proto = "https" if self.forwarded_https() else "http"
-        return f"{proto}://{self.headers.get('Host', f'127.0.0.1:{PORT}')}"
+        host = self.headers.get("Host") or ""
+        if not HOST_RE.match(host):                 # 只接受正常的主机名/IP[:端口]，防止拼进安装命令
+            host = f"127.0.0.1:{PORT}"
+        return f"{proto}://{host}"
 
     # ---- dispatch
     def do_GET(self):
@@ -1117,6 +1256,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def route(self, method):
         self._renew = False
+        self._sid = None
         u = urllib.parse.urlparse(self.path)
         path, qs = u.path, urllib.parse.parse_qs(u.query)
         try:
@@ -1132,6 +1272,9 @@ class Handler(BaseHTTPRequestHandler):
                 token = auth[7:] if auth.startswith("Bearer ") else ""
                 code, obj = handle_report(token, self.read_json(), self.client_ip())
                 return self.send_json(code, obj)
+            # Agent 上报靠 Token 认证、不带 Cookie，不需要 CSRF 检查；其余改动请求都要
+            if method != "GET" and not self.csrf_ok():
+                return self.send_json(403, {"error": "请求来源无效，请刷新页面后重试"})
             if method == "POST" and path == "/api/login":
                 ip = self.client_ip()
                 left = login_locked(ip)
@@ -1145,7 +1288,10 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(1)
                 return self.send_json(401, {"error": "密码错误"})
             if method == "POST" and path == "/api/logout":
-                return self.send_json(200, {"ok": True}, {"Set-Cookie": "vt_session=; Path=/; Max-Age=0"})
+                s = self.session()
+                if s:
+                    revoke_session(s[1])            # 这个会话（含被复制走的 Cookie）立即失效
+                return self.send_json(200, {"ok": True}, {"Set-Cookie": "vt_session=; Path=/; Max-Age=0; SameSite=Strict"})
             if not path.startswith("/api/"):
                 return self.send_json(404, {"error": "not found"})
             if not self.authed():
@@ -1335,16 +1481,45 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(405, {"error": "method not allowed"})
 
 
+class LimitedServer(ThreadingHTTPServer):
+    """限制同时处理的连接数，超出的直接断开，防止大量连接耗尽线程和内存"""
+    daemon_threads = True
+    request_queue_size = 128
+
+    def __init__(self, *a, **kw):
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(*a, **kw)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def main():
     init_db()
     if len(sys.argv) >= 2 and sys.argv[1] == "--set-password":
-        if len(sys.argv) < 3 or len(sys.argv[2]) < 8:
-            sys.exit("用法：python3 server.py --set-password 新密码（至少 8 位）")
-        set_password(sys.argv[2])
+        pw = sys.argv[2] if len(sys.argv) >= 3 else ""
+        if pw == "-":
+            pw = sys.stdin.readline().rstrip("\r\n")
+        if len(pw) < 8:
+            sys.exit("用法：python3 server.py --set-password 新密码（至少 8 位；用 - 表示从标准输入读取）")
+        set_password(pw)
         print("密码已更新，请重启服务：systemctl restart vps-traffic-panel")
         return
     threading.Thread(target=maintenance_loop, daemon=True).start()
-    httpd = ThreadingHTTPServer((LISTEN, PORT), Handler)
+    httpd = LimitedServer((LISTEN, PORT), Handler)
     print(f"[start] 面板运行于 http://{LISTEN}:{PORT}  时区 {TZ_NAME}")
     httpd.serve_forever()
 

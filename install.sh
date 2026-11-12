@@ -7,7 +7,7 @@ set -e
 
 # agent.sh 的 SHA256：agent.sh 每次修改后用 sh tools/pin_agent.sh hash 更新
 REPO="Ronin52658/vps-traffic"
-AGENT_SHA256="ec23c6953b08827403722c059fefae9f0f437b0561f81ac68d29371d4c1ac125"
+AGENT_SHA256="c488a7ed97078c9c6359ba133c0c3cc7d7c747133887a9b52355686b0d7b681c"
 
 SERVER="" TOKEN="" IFACE="auto" INTERVAL=3 UNINSTALL=0 REF=""
 while [ $# -gt 0 ]; do
@@ -34,6 +34,11 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 [ -n "$SERVER" ] && [ -n "$TOKEN" ] || { echo "需要 --server 与 --token"; exit 1; }
+# 这些值会写进配置文件，只接受安全字符
+printf '%s' "$SERVER" | grep -Eq '^https?://[]A-Za-z0-9.:[-]+(/[A-Za-z0-9._~/-]*)?$' || { echo "--server 格式不对：$SERVER"; exit 1; }
+printf '%s' "$TOKEN" | grep -Eq '^[A-Za-z0-9_-]{16,128}$' || { echo "--token 格式不对"; exit 1; }
+printf '%s' "$IFACE" | grep -Eq '^[A-Za-z0-9_.@:-]{1,15}$' || { echo "--iface 格式不对：$IFACE"; exit 1; }
+printf '%s' "$INTERVAL" | grep -Eq '^[0-9]{1,3}$' || { echo "--interval 须为数字"; exit 1; }
 # 只接受完整的 40 位提交哈希，不接受分支或标签（分支内容会变）
 printf '%s' "$REF" | grep -Eq '^[0-9a-f]{40}$' || { echo "需要 --ref <40 位提交哈希>"; exit 1; }
 command -v sha256sum >/dev/null 2>&1 || { echo "缺少 sha256sum（coreutils）"; exit 1; }
