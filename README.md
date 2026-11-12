@@ -33,7 +33,7 @@ sh install_panel.sh --domain traffic.example.com --port 8080
 结束后会打印访问地址和随机生成的登录密码。也可以用 `--ask-password` 交互输入自己的密码（至少 8 位，不会留在 shell 历史里），或 `--password 你的密码` 直接指定。
 
 其他参数：
-- `--proxy`：信任的反代地址（逗号分隔的 IP 或网段），默认 `127.0.0.1,::1,172.16.0.0/12`，覆盖本机和 Docker 里的 NPM。NPM 在另一台机器上时，填那台机器的 IP。
+- `--proxy`：信任的反代地址（逗号分隔的 IP 或网段），默认 `127.0.0.1,::1,172.16.0.0/12`，覆盖本机和 Docker 里的 NPM。NPM 在另一台机器上时，填那台机器的 IP。信任列表里的地址可以绕过 HTTPS 检查、伪造访客 IP，这台机器上还跑着其他不受信任的 Docker 容器时，建议缩小到 NPM 所在的网段（`docker network inspect` 查看）。
 - `--listen`：监听地址，默认 `0.0.0.0`（Docker 里的 NPM 需要能连到）。
 
 重新运行 `install_panel.sh` 即可升级，数据库、密码、端口、时区、反代和 Telegram 设置都会保留。从旧版（root 运行、数据库在 `/opt/vps-traffic-panel`）升级时，数据库会自动搬到 `/var/lib/vps-traffic-panel`。卸载：`sh install_panel.sh --uninstall`（数据库保留）。
@@ -52,7 +52,7 @@ sh install_panel.sh --domain traffic.example.com --port 8080
 - 单个连接 20 秒没有完成请求就断开，同时最多处理 200 个连接，慢速连接拖不垮面板。
 - 页面禁止被其他网站嵌入（防点击劫持）。
 - 登录限流两层：同一 IP 连续输错 5 次锁 15 分钟；所有 IP 合计 10 分钟内失败 30 次，暂停陌生 IP 登录 15 分钟。最近 30 天成功登录过的 IP 不受全局暂停影响，攻击者没法借此把你锁在门外。
-- 强制 HTTPS：面板只接受“来自信任反代地址、且 `X-Forwarded-Proto: https`”的请求，否则网页显示“需要 HTTPS”、接口返回 403；Host 也必须是设置的域名。登录 Cookie 只经 HTTPS 发送，并下发 HSTS，浏览器之后自动只用 HTTPS。
+- 强制 HTTPS：面板只接受“来自信任反代地址、且 `X-Forwarded-Proto: https`”的请求，不在信任列表里的来源（比如公网直接连端口）在建立连接后立即断开，连页面都拿不到，也占不住连接名额；反代没用 HTTPS 时网页显示“需要 HTTPS”、接口返回 403；Host 也必须是设置的域名。登录 Cookie 只经 HTTPS 发送，并下发 HSTS，浏览器之后自动只用 HTTPS。
 - 紧急情况（例如证书过期进不去）可以在服务文件里把 `VT_REQUIRE_HTTPS=1` 改成 `0` 临时关闭，处理完记得改回来。
 
 ## 面板的权限
@@ -68,7 +68,7 @@ sh install_panel.sh --domain traffic.example.com --port 8080
 
 1. NPM 里新增 Proxy Host：Domain 填部署时的 `--domain`，Forward 填 `http` + 面板机器的 IP + 端口 8080（NPM 和面板在同一台时，填 Docker 网桥网关地址，如 `172.17.0.1`，用 `docker network inspect` 查看；或这台机器的公网 IP）。
 2. SSL 页签申请 Let's Encrypt 证书，开启 Force SSL（建议也开 HTTP/2、HSTS）。
-3. 用 `https://域名` 登录。打开时看到“需要 HTTPS”，说明请求不是从信任的反代来的：检查 NPM 的来源地址是否在 `--proxy` 列表里（`journalctl -u vps-traffic-panel` 可看到当前的信任列表）。
+3. 用 `https://域名` 登录。打开时 NPM 报 502，或看到“需要 HTTPS”，说明请求不是从信任的反代、或不是经 HTTPS 来的：检查 NPM 的来源地址是否在 `--proxy` 列表里（`journalctl -u vps-traffic-panel` 可看到当前的信任列表）。
 4. 建议在防火墙/安全组里关闭 8080 对公网的访问，只让反代连。面板本身也会拒绝非反代的请求，这一步是多一层保护。
 
 面板的登录 Cookie 现在属于域名，不再和同一 IP 上其他端口的面板共用。
@@ -165,7 +165,7 @@ Agent 由 systemd 以临时普通用户（`DynamicUser`）运行，不是 root�
 
 在“设置”里：
 
-- 下载备份：一个 `.db` 文件，包含所有服务器设置、Agent Token、周期历史与小时明细。内含 Token，请妥善保管。
+- 下载备份：一个 `.db` 文件，包含所有服务器设置、Agent Token、周期历史与小时明细。不含登录密码哈希和会话密钥（拿到备份的人不能登录面板），但内含 Agent Token，请妥善保管。
 - 从备份还原：先验证文件（格式、完整性、表结构），再完全替换当前数据。还原前自动保存 `traffic.db.before-restore-时间`（保留最近 5 份）；当前登录密码、会话密钥和登录白名单不变；备份里的触发器和视图一律删除，被人改过的备份文件也无法借还原篡改密码。
 
 迁移面板：旧面板下载备份 → 新面板还原 → 各台 VPS 把 `/etc/vps-traffic/agent.conf` 的 `SERVER` 改成新地址后 `systemctl restart vps-traffic-agent`。

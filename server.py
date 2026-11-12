@@ -72,6 +72,8 @@ LOGIN_LOCK_SEC = 900            # 锁定 15 分钟
 GLOBAL_FAIL_WINDOW = 600        # 全局限流：10 分钟内
 GLOBAL_FAIL_MAX = 30            # 所有 IP 合计失败这么多次，就暂停陌生 IP 的登录
 GLOBAL_LOCK_SEC = 900           # 暂停 15 分钟；最近成功登录过的 IP 不受影响
+MAX_QUOTA_GB = 1e7              # 额度上限（GB）
+MAX_ORDER_IDS = 10000
 MAX_CONNECTIONS = 200           # 同时处理的连接上限，超出的直接断开
 REQUEST_TIMEOUT = 20            # 单个连接读写超时（秒），防止慢速连接占满线程
 MAX_FAIL_ENTRIES = 10000        # 登录失败记录上限，防止内存无限增长
@@ -233,6 +235,9 @@ def migrate(conn):
     for col, decl in SERVER_COLUMNS.items():
         if col not in have:
             conn.execute(f"ALTER TABLE servers ADD COLUMN {col} {decl}")
+    # 旧版允许填 Infinity 之类的额度，会让网页解析失败：改成不限额
+    for t in ("servers", "cycles"):
+        conn.execute(f"UPDATE {t} SET quota_gb=0 WHERE NOT (quota_gb BETWEEN 0 AND ?)", (MAX_QUOTA_GB,))
 
 
 def get_setting(conn, k):
@@ -867,7 +872,10 @@ def clean_server_input(b, partial=False):
     if "note" in b:
         out["note"] = str(b["note"])[:200]
     if "quota_gb" in b or not partial:
-        out["quota_gb"] = max(0.0, float(b.get("quota_gb") or 0))
+        q = float(b.get("quota_gb") or 0)
+        if not 0 <= q <= MAX_QUOTA_GB:          # 也挡掉 NaN / Infinity（会让网页无法解析数据）
+            raise ValueError(f"额度须在 0–{MAX_QUOTA_GB:g} GB")
+        out["quota_gb"] = q
     if "billing" in b or not partial:
         v = b.get("billing", "sum")
         if v not in VALID_BILLING:
@@ -972,6 +980,16 @@ def export_backup():
             copy_db(conn, path)
         finally:
             conn.close()
+    # 备份里去掉会话密钥、密码哈希、登录白名单和吊销表：拿到备份文件的人不能伪造登录，
+    # 也不能离线破解密码（还原时这些本来就沿用当前面板的值）
+    out = sqlite3.connect(path)
+    try:
+        ph = ",".join("?" * len(SECURITY_SETTINGS))
+        out.execute(f"DELETE FROM settings WHERE k IN ({ph})", SECURITY_SETTINGS)
+        out.commit()
+        out.execute("VACUUM")               # 删掉的内容不残留在文件空闲页里
+    finally:
+        out.close()
     return path
 
 
@@ -1206,7 +1224,10 @@ class Handler(BaseHTTPRequestHandler):
         if n < 0 or n > 65536:
             raise ValueError("body too large")
         raw = self.rfile.read(n) if n else b"{}"
-        return json.loads(raw or b"{}")
+        obj = json.loads(raw or b"{}")
+        if not isinstance(obj, dict):
+            raise ValueError("请求格式错误")
+        return obj
 
     def session(self):
         try:
@@ -1303,9 +1324,10 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and path == "/api/site":
                 return self.send_json(200, {"name": get_site_name(), "theme": get_theme()})
             if method == "POST" and path == "/api/report":
+                ip = self.client_ip()
                 auth = self.headers.get("Authorization", "")
                 token = auth[7:] if auth.startswith("Bearer ") else ""
-                code, obj = handle_report(token, self.read_json(), self.client_ip())
+                code, obj = handle_report(token, self.read_json(), ip)
                 return self.send_json(code, obj)
             # Agent 上报靠 Token 认证、不带 Cookie，不需要 CSRF 检查；其余改动请求都要
             if method != "GET" and not self.csrf_ok():
@@ -1438,7 +1460,8 @@ class Handler(BaseHTTPRequestHandler):
                                         "site_name": get_site_name()})
         if path == "/api/order" and method == "POST":
             ids = self.read_json().get("ids")
-            if not isinstance(ids, list) or not all(isinstance(i, int) for i in ids):
+            if (not isinstance(ids, list) or len(ids) > MAX_ORDER_IDS
+                    or not all(type(i) is int and 0 < i < 2 ** 62 for i in ids)):
                 raise ValueError("排序数据无效")
             with txn() as conn:
                 for n, sid in enumerate(ids):
@@ -1524,6 +1547,19 @@ class LimitedServer(ThreadingHTTPServer):
     def __init__(self, *a, **kw):
         self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         super().__init__(*a, **kw)
+
+    def verify_request(self, request, client_address):
+        """强制 HTTPS 时，非信任反代的连接在读取任何数据前直接断开：
+        公网直连端口的人既拿不到页面，也占不住连接名额"""
+        if not REQUIRE_HTTPS:
+            return True
+        v = client_address[0]
+        v = v[7:] if v.startswith("::ffff:") else v
+        try:
+            a = ipaddress.ip_address(v)
+        except ValueError:
+            return False
+        return any(a in n for n in TRUSTED_PROXIES)
 
     def process_request(self, request, client_address):
         if not self._slots.acquire(blocking=False):
