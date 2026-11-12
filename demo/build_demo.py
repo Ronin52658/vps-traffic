@@ -44,6 +44,14 @@ import json
 rep("const flagSrc = cc => `/flags/${cc.toLowerCase()}.png`;",
     "const FLAG_DATA = " + json.dumps(flag_data) + ";\nconst flagSrc = cc => FLAG_DATA[cc] || \"data:,\";")
 
+# 网站图标：演示站没有后端，SVG 图标内嵌成 data URI，其余图标链接去掉
+svg = open(os.path.join(HERE, "..", "icons", "favicon.svg"), "rb").read()
+rep('<link rel="icon" href="/favicon.svg" type="image/svg+xml">',
+    '<link rel="icon" href="data:image/svg+xml;base64,' + base64.b64encode(svg).decode() + '" type="image/svg+xml">')
+for line in ('<link rel="icon" href="/favicon.ico" sizes="48x48">\n', '<link rel="apple-touch-icon" href="/apple-touch-icon.png">\n',
+             '<link rel="manifest" href="/manifest.webmanifest">\n'):
+    rep(line, "")
+
 # 注入模拟后端
 rep("<script>\nconst $ =", f"<script>\n{mock}\n</script>\n<script>\nconst $ =")
 

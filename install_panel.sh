@@ -40,7 +40,7 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 SRC=$(cd "$(dirname "$0")" && pwd)
-for f in server.py index.html agent_pin.json vps-traffic-panel.service; do
+for f in server.py index.html agent_pin.json vps-traffic-panel.service icons/favicon.svg; do
   [ -f "$SRC/$f" ] || { echo "缺少 $f，请在解压后的目录里运行"; exit 1; }
 done
 command -v python3 >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq python3; }
@@ -82,10 +82,11 @@ printf '%s' "$LISTEN" | grep -Eq '^[0-9A-Fa-f.:]+$' || { echo "--listen 格式�
 id "$USR" >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$USR"
 
 # 程序文件：root 所有，面板只能读
-mkdir -p "$DIR/flags"
+mkdir -p "$DIR/flags" "$DIR/icons"
 rm -f "$DIR/agent.sh" "$DIR/install.sh"   # 旧版由面板提供 Agent 脚本，现改从 GitHub 下载
 cp "$SRC/server.py" "$SRC/index.html" "$SRC/agent_pin.json" "$DIR/"
 cp "$SRC"/flags/* "$DIR/flags/"
+cp "$SRC"/icons/* "$DIR/icons/"
 chown -R root:root "$DIR"
 chmod -R u=rwX,go=rX "$DIR"
 

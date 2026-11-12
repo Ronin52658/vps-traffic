@@ -14,6 +14,7 @@ Agent 读取网卡计数和系统状态（CPU、负载、内存、Swap、硬盘�
 | tools/pin_agent.sh | 更新 agent.sh 哈希、切换固定提交、检查 GitHub 上的文件 |
 | install_panel.sh | 面板一键部署 |
 | flags/ | 国旗图片（Noto Color Emoji，Apache 2.0），由面板提供 |
+| icons/ | 网站图标（浏览器标签页、收藏夹、手机“添加到主屏幕”），favicon.svg 是源文件 |
 | vps-traffic-panel.service | 面板的 systemd 模板（install_panel.sh 会用到） |
 | demo/ | 演示站：mock.js 模拟后端，build_demo.py 从 index.html 生成 demo.html |
 

@@ -1260,6 +1260,11 @@ def prune_revoked():
 FLAG_RE = re.compile(r"^/flags/([a-z]{2})\.png$")
 
 STATIC = {"/": ("index.html", "text/html; charset=utf-8")}   # Agent 脚本改从 GitHub 固定提交下载
+# 网站图标：浏览器标签页、收藏夹、手机“添加到主屏幕”
+ICONS = {"/favicon.svg": ("icons/favicon.svg", "image/svg+xml"),
+         "/favicon.ico": ("icons/favicon.ico", "image/x-icon"),
+         "/apple-touch-icon.png": ("icons/apple-touch-icon.png", "image/png"),
+         "/icon-512.png": ("icons/icon-512.png", "image/png")}
 
 ROUTE_SRV = re.compile(r"^/api/servers/(\d{1,15})(?:/(daily|hourly|cycles|reset|token|metrics))?$")
 
@@ -1438,6 +1443,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reject_transport(path, why)
             if method == "GET" and path in STATIC:
                 return self.serve_static(*STATIC[path])
+            if method == "GET" and path in ICONS:
+                return self.serve_static(*ICONS[path], cache=True)
+            if method == "GET" and path == "/manifest.webmanifest":
+                return self.send_manifest()
             m = FLAG_RE.match(path)
             if method == "GET" and m:
                 return self.serve_static(f"flags/{m.group(1)}.png", "image/png", cache=True)
@@ -1522,6 +1531,22 @@ class Handler(BaseHTTPRequestHandler):
             for p in (path, path + "-wal", path + "-shm", path + "-journal"):
                 if os.path.exists(p):
                     os.remove(p)
+
+    def send_manifest(self):
+        """添加到主屏幕用的应用清单，名称跟随面板“设置”里的名称"""
+        name = get_site_name()
+        data = json.dumps({
+            "name": name, "short_name": name[:12], "start_url": "/", "display": "standalone",
+            "background_color": "#E4E9F0", "theme_color": "#1F2A37",
+            "icons": [{"src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml"},
+                      {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}],
+        }, ensure_ascii=False).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/manifest+json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(data)
 
     def serve_static(self, fname, ctype, cache=False):
         fp = os.path.join(BASE, fname)

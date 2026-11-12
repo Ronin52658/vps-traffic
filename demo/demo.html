@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>VPS 流量面板演示</title>
 <meta name="theme-color" content="#E4E9F0">
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImJnIiB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzJFM0E0QiIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiMxQTIyMkQiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgcng9IjE1IiBmaWxsPSJ1cmwoI2JnKSIvPgogIDwhLS0g5LiL6KGM77ya6JOd6Imy5ZCR5LiL566t5aS0IC0tPgogIDxwYXRoIGQ9Ik0yMSAxM3YyNi41aC03LjVMMjUgNTJsMTEuNS0xMi41SDI5VjEzeiIgZmlsbD0iIzc4QTZGRiIgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTQgMCkiLz4KICA8IS0tIOS4iuihjO+8muapmeiJsuWQkeS4iueureWktCAtLT4KICA8cGF0aCBkPSJNNDMgNTFWMjQuNWg3LjVMMzkgMTIgMjcuNSAyNC41SDM1VjUxeiIgZmlsbD0iI0ZGQUU2MiIgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoNCAwKSIvPgo8L3N2Zz4K" type="image/svg+xml">
+<meta name="apple-mobile-web-app-title" content="VPS 流量">
 <script>
 // 主题：system（跟随系统）/ light（白天）/ dark（夜间）。在页面绘制前就决定，避免闪一下白屏
 (function () {
@@ -1444,6 +1446,7 @@ function applySiteName(name) {
   name = name || "VPS 流量";
   document.querySelectorAll(".siteName").forEach(el => el.textContent = name);
   document.title = name;
+  const m = document.querySelector('meta[name="apple-mobile-web-app-title"]'); if (m) m.content = name;
 }
 fetch("/api/site").then(r => r.json()).then(j => {
   applySiteName(j.name);
