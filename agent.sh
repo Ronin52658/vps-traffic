@@ -5,6 +5,8 @@
 # 依赖：sh、awk、df、curl 或 wget（Debian 默认即有）；ICMP 测试需要 ping，TCP 测试需要 curl
 # 以 systemd 的临时普通用户运行：配置由 systemd 以 root 读取后通过环境变量传入，
 # 状态目录由 systemd 的 StateDirectory 提供（$STATE_DIRECTORY）
+# 固定用 C 语言环境：德语、法语等环境下 awk 会把小数点输出成逗号（12,5），JSON 就坏了
+export LC_ALL=C
 CONF=${CONF:-/etc/vps-traffic/agent.conf}
 STATE_DIR=${STATE_DIR:-${STATE_DIRECTORY:-/var/lib/vps-traffic}}
 STATE="$STATE_DIR/state"
@@ -69,7 +71,9 @@ read_cpu() { awk '/^cpu /{t=0; for(i=2;i<=9;i++) t+=$i; printf "%.0f %.0f", t, $
 clean() { printf '%s' "$1" | tr -d '"\\' | tr -d '\000-\037' | cut -c1-120; }
 
 # 动态指标：CPU、负载、内存、Swap、硬盘、连接数、进程数、运行时间
-sys_json() {
+# 结果写进变量 sys，必须在当前 shell 里调用（不能用 $(...)）：CPU 使用率要和上一次的计数比较，
+# 上一次的计数存在 cpu_t/cpu_i 里，放进子 shell 就丢了，CPU 会一直是 0
+build_sys() {
   set -- $(read_cpu)
   if [ -n "$cpu_t" ] && [ "$1" -gt "$cpu_t" ]; then
     # iowait 计数偶尔倒退，结果夹到 0–100
@@ -92,8 +96,8 @@ sys_json() {
   tcp=$( [ -n "$tf" ] && awk 'FNR>1{n++} END{print n+0}' $tf || echo 0)
   udp=$( [ -n "$uf" ] && awk 'FNR>1{n++} END{print n+0}' $uf || echo 0)
   procs=$(set -- /proc/[0-9]*; echo $#)
-  printf '{"cpu":%s,"load":[%s,%s,%s],"mem":[%s],"disk":[%s],"tcp":%s,"udp":%s,"procs":%s,"uptime":%s}' \
-    "$cpu" "$l1" "$l2" "$l3" "$mem" "$disk" "$tcp" "$udp" "$procs" "$up"
+  sys=$(printf '{"cpu":%s,"load":[%s,%s,%s],"mem":[%s],"disk":[%s],"tcp":%s,"udp":%s,"procs":%s,"uptime":%s}' \
+    "$cpu" "$l1" "$l2" "$l3" "$mem" "$disk" "$tcp" "$udp" "$procs" "$up")
 }
 
 # 静态信息：系统、内核、CPU 型号、核心数、虚拟化（首次和之后每 10 分钟发一次）
@@ -189,8 +193,15 @@ lat_json() {
   printf ',"lat":['
   first=1
   for f in $lat_files; do
+    # 只带格式正确的结果；坏的那条丢掉，免得整条上报一直失败、流量也一直送不出去
+    line=$(cat "$LAT_DIR/$f" 2>/dev/null)
+    case "$line" in
+      \[*\]) ;;
+      *) continue ;;
+    esac
+    printf '%s' "$line" | grep -Eq '^\[[0-9]{1,9},[0-9]{1,4},-?[0-9]{1,4}(,[0-9]{1,6}(\.[0-9]{1,6})?){3}\]$' || continue
     [ $first = 1 ] || printf ','
-    cat "$LAT_DIR/$f"; first=0
+    printf '%s' "$line"; first=0
   done
   printf ']'
 }
@@ -226,7 +237,7 @@ while :; do
     fi
     last_rx=$cur_rx last_tx=$cur_tx
     pend_rx=$((pend_rx + d_rx)) pend_tx=$((pend_tx + d_tx))
-    sys=$(sys_json)
+    build_sys
     info=""
     if [ -z "$info_at" ] || [ $((up - info_at)) -ge 600 ] || [ "$up" -lt "$info_at" ]; then
       info=",\"info\":$(info_json)"; info_at=$up
