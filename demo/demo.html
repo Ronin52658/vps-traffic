@@ -1365,8 +1365,10 @@ const LAT = {range: "1h", hidden: new Set(), smooth: false, loaded: 0, data: nul
 const latColor = i => LAT_COLORS[i % LAT_COLORS.length];
 const fms = v => v == null ? "—" : (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + "ms";
 const latTarget = t => t.kind === "tcp" ? `TCP ${t.host.includes(":") ? `[${t.host}]` : t.host}:${t.port}` : `ICMP ${t.host}`;
-// datetime-local 用浏览器本地时间
-const toLocalInput = ts => { const d = new Date(ts * 1000); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+// 自定义区间的时间按面板时区填写和解读，与图表横轴一致（浏览器所在时区可能不同）
+const tzOff = ts => (Date.parse(new Date(ts * 1000).toLocaleString("sv-SE", {timeZone: META.tz || undefined}).replace(" ", "T") + "Z") - ts * 1000) / 1000;
+const toLocalInput = ts => new Date((ts + tzOff(ts)) * 1000).toISOString().slice(0, 16);
+const fromLocalInput = v => { const t = Date.parse(v + ":00Z") / 1000; return t - tzOff(t); };
 
 async function tabLatency() {
   const now = Math.floor(Date.now() / 1000);
@@ -1376,7 +1378,7 @@ async function tabLatency() {
       <div class="seg" id="latRange">${LAT_RANGES.map(([k, v]) => `<button data-r="${k}" class="${LAT.range === k ? "on" : ""}">${v}</button>`).join("")}</div>
     </div>
     <form id="latCustom" class="range-row" style="margin-top:14px;${LAT.range === "custom" ? "" : "display:none"}">
-      <label>开始<input type="datetime-local" name="s" value="${toLocalInput(LAT.start)}"></label><span class="to">至</span>
+      <label>开始（${esc(META.tz || "")}）<input type="datetime-local" name="s" value="${toLocalInput(LAT.start)}"></label><span class="to">至</span>
       <label>结束<input type="datetime-local" name="e" value="${toLocalInput(LAT.end)}"></label>
       <button class="btn primary" type="submit" style="grid-column:1/-1">查询</button>
     </form>
@@ -1389,7 +1391,7 @@ async function tabLatency() {
   });
   $("#latCustom").onsubmit = e => {
     e.preventDefault();
-    const s = Date.parse(e.target.s.value) / 1000, en = Date.parse(e.target.e.value) / 1000;
+    const s = fromLocalInput(e.target.s.value), en = fromLocalInput(e.target.e.value);
     if (!(s < en)) return toast("结束时间要晚于开始时间");
     LAT.start = Math.floor(s); LAT.end = Math.floor(en); loadLatency();
   };
