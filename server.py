@@ -670,7 +670,7 @@ def fmt_time(ts):
 
 
 def alive_loop():
-    """每 15 秒检查一次：在线的机器超过离线判定时间没上报，就标记离线并通知（多台同时离线合并成一条）。
+    """每 15 秒检查一次：在线的机器超过离线判定时间没上报，就标记离线并通知；恢复上线的也在这里发出。多台同时离线或恢复都合并成一条。
     面板刚启动的一段时间内不判定离线：面板停机期间所有机器都没法上报，重启后不应该误报"""
     while True:
         time.sleep(15)
@@ -680,7 +680,25 @@ def alive_loop():
             print(f"[alive] {e}")
 
 
+_RECOVERED = []                 # 恢复上线、等待合并发送的：[(名称, 离线秒数)]
+_RECOVER_LOCK = threading.Lock()
+
+
+def flush_recovered():
+    with _RECOVER_LOCK:
+        items = _RECOVERED[:]
+        _RECOVERED.clear()
+    if not items:
+        return
+    site = get_site_name()
+    if len(items) == 1:
+        tg_send(f"🟢 [{site}] {items[0][0]} 恢复上线\n离线时长：{fmt_dur(items[0][1])}")
+    else:
+        tg_send(f"🟢 [{site}] {len(items)} 台 VPS 恢复上线\n" + "\n".join(f"· {n}（离线 {fmt_dur(d)}）" for n, d in items))
+
+
 def check_alive(now):
+    flush_recovered()
     limit = offline_after()
     if now - START_TIME < limit + 15:
         return
@@ -842,7 +860,8 @@ def handle_report(token, body, ip=""):
         if srv["alive_state"] != "online":
             conn.execute("UPDATE servers SET alive_state='online' WHERE id=?", (srv["id"],))
             if srv["alive_state"] == "offline" and srv["notify_offline"] and OFFLINE_NOTIFY:
-                tg_send(f"🟢 [{get_site_name_conn(conn)}] {srv['name']} 恢复上线\n离线时长：{fmt_dur(now - srv['last_seen'])}")
+                with _RECOVER_LOCK:                 # 攒一下，几秒内一起恢复的合并成一条
+                    _RECOVERED.append((srv["name"], now - srv["last_seen"]))
         t = time.time()
         gap = t - LAST_REPORT.get(srv["id"], srv["last_seen"])
         LAST_REPORT[srv["id"]] = t

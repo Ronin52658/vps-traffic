@@ -1340,7 +1340,7 @@ function openSettings() {
     </div>
     <div class="card">
       <h3>离线通知</h3>
-      <p class="hint" style="margin-bottom:12px">VPS 超过设定时间没有上报就算离线，离线和恢复上线时各发一条 Telegram 消息；多台同时离线会合并成一条。面板刚重启的几分钟内不判定离线，避免误报。单台服务器可以在它的“设置”分页里关掉通知。</p>
+      <p class="hint" style="margin-bottom:12px">VPS 超过设定时间没有上报就算离线，离线和恢复上线时各发一条 Telegram 消息；多台同时离线或恢复会合并成一条。面板刚重启的几分钟内不判定离线，避免误报。单台服务器可以在它的“设置”分页里关掉通知。</p>
       <p class="hint" style="margin-bottom:12px" id="tgState">${META.telegram ? "Telegram：已配置" : "Telegram：<b>未配置</b>。在面板机器的 <code>/etc/vps-traffic-panel.env</code> 里填 <code>VT_TG_TOKEN</code> 和 <code>VT_TG_CHAT</code>，再 <code>systemctl restart vps-traffic-panel</code>。"}</p>
       <form id="ntForm">
         <div class="grid2">
