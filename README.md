@@ -86,13 +86,14 @@ sh install_panel.sh --domain traffic.example.com --port 8080
 面板点“新增服务器”，复制生成的命令在 VPS 上以 root 运行（三行一起粘贴）：
 
 ```sh
-curl -fsSL --proto '=https' -o /root/vps-traffic-install.sh https://raw.githubusercontent.com/Ronin52658/vps-traffic/<提交>/install.sh
+if command -v curl >/dev/null; then curl -fsSL --proto '=https' -o /root/vps-traffic-install.sh <地址>; else wget -q --https-only -O /root/vps-traffic-install.sh <地址>; fi
 echo "<install.sh 的 SHA256>  /root/vps-traffic-install.sh" | sha256sum -c - && sh /root/vps-traffic-install.sh --ref <提交> --server 'https://traffic.example.com' --token <TOKEN> --interval 3
 rm -f /root/vps-traffic-install.sh
 ```
 
 - 脚本固定在 `agent_pin.json` 指定的提交，不跟随分支变化；仓库之后再改，已生成的命令装出来的仍是同一份代码。
 - 两层校验：命令先校验 install.sh 的 SHA256（来自面板的 `agent_pin.json`），install.sh 再校验 agent.sh 的 SHA256（写在 install.sh 里），任何一层不一致都中止，不会改动 VPS。
+- 第一行有 curl 用 curl，只有 wget 的精简系统自动改用 wget；`<地址>` 是 `https://raw.githubusercontent.com/Ronin52658/vps-traffic/<提交>/install.sh`。没有 curl 时 TCP 延迟测试不可用（ICMP 不受影响）。
 - 可选参数加在第二行末尾：`--iface eth0` 指定网卡（默认自动检测默认路由），`--interval 3` 初始上报间隔（秒）。
 
 ### VPS 连不上 GitHub

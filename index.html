@@ -867,12 +867,14 @@ function bindForm(onSubmit) {
 }
 
 // Agent 从 GitHub 固定提交安装：先下载 install.sh 并校验 SHA256，通过才运行；install.sh 再校验 agent.sh
+// 下载命令：有 curl 用 curl，只有 wget 的精简系统用 wget（很多 VPS 模板默认不带 curl）
+const dlCmd = (f, url) => `if command -v curl >/dev/null; then curl -fsSL --proto '=https' -o ${f} ${url}; else wget -q --https-only -O ${f} ${url}; fi`;
 function installCmd(token) {
   const b = META.base_url, a = META.agent;
   if (!a) return "# 面板没有配置 Agent 固定版本（agent_pin.json），无法生成安装命令";
   const f = "/root/vps-traffic-install.sh";
   return [
-    `curl -fsSL --proto '=https' -o ${f} https://raw.githubusercontent.com/${a.repo}/${a.commit}/install.sh`,
+    dlCmd(f, `https://raw.githubusercontent.com/${a.repo}/${a.commit}/install.sh`),
     `echo "${a.install_sha256}  ${f}" | sha256sum -c - && sh ${f} --ref ${a.commit} --server '${b}' --token ${token} --interval ${META.interval || 3}`,
     `rm -f ${f}`,
   ].join("\n");
@@ -887,7 +889,7 @@ function altInstallHtml(token) {
   const off = `cd /root && echo "${a.install_sha256}  install.sh" | sha256sum -c - && sh install.sh --agent-file agent.sh --server '${b}' --token ${token} --interval ${iv} && rm -f install.sh agent.sh`;
   const f = "/root/vps-traffic-install.sh";
   const mir = [
-    `curl -fsSL --proto '=https' -o ${f} ${MIRROR}${raw}/install.sh`,
+    dlCmd(f, `${MIRROR}${raw}/install.sh`),
     `echo "${a.install_sha256}  ${f}" | sha256sum -c - && sh ${f} --ref ${a.commit} --mirror ${MIRROR} --server '${b}' --token ${token} --interval ${iv}`,
     `rm -f ${f}`,
   ].join("\n");
@@ -1058,7 +1060,7 @@ function renderLatency() {
   }
   const cards = d.tasks.map((t, i) => {
     const s = t.stats, off = LAT.hidden.has(t.id);
-    const v = s.error ? `<div class="v bad">无法探测${t.kind === "icmp" ? "（这台 VPS 不允许 ping，可改用 TCP）" : ""}</div>`
+    const v = s.error ? `<div class="v bad">无法探测${t.kind === "icmp" ? "（这台 VPS 不允许 ping，可改用 TCP）" : "（TCP 测试需要 VPS 装有 curl）"}</div>`
       : `<div class="v num${s.last == null && s.last_loss >= 100 ? " bad" : ""}">${s.last == null && s.last_loss >= 100 ? "超时" : fms(s.last)} · ${s.loss == null ? "—" : s.loss.toFixed(2) + "%"} · ${s.jitter == null ? "—" : s.jitter.toFixed(2)}</div>`;
     return `<button class="lat-card${off ? " off" : ""}" data-id="${t.id}" title="${esc(latTarget(t))}，每 ${t.interval} 秒测一次。点卡片显示/隐藏曲线">
       <i class="c" style="background:${latColor(i)}"></i><b>${esc(t.name)}</b>${v}<span class="tip">ⓘ</span></button>`;
