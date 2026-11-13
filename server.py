@@ -117,7 +117,7 @@ TRUSTED_PROXIES = _parse_proxies(os.environ.get("VT_TRUSTED_PROXIES", "127.0.0.1
 
 # 域名开了 Cloudflare 代理（橙色云朵）时：请求经 Cloudflare → NPM → 面板，NPM 在 X-Forwarded-For 末尾追加的是
 # Cloudflare 节点的 IP。开启 VT_CLOUDFLARE=1 后，取真实 IP 时把 Cloudflare 的地址也当作“中间一跳”跳过，
-# 拿到的就是访客 / Agent 的真实 IP。这些地址只用于识别转发链，不会被当作可直连面板的反代。
+# 拿到的就是访客 / Agent 的真实 IP（取 Cloudflare 填的 CF-Connecting-IP）。这些地址只用于识别转发链，不会被当作可直连面板的反代。
 # 地址段来自 https://www.cloudflare.com/ips-v4 和 ips-v6；Cloudflare 改了可用 VT_CLOUDFLARE_IPS 覆盖
 CF_DEFAULT = ("173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,"
               "190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,"
@@ -1829,22 +1829,34 @@ class Handler(BaseHTTPRequestHandler):
             v = v.strip()
             return v[7:] if v.startswith("::ffff:") else v
 
-        def trusted(v):
+        def addr(v):
             try:
-                a = ipaddress.ip_address(v)
+                return ipaddress.ip_address(v)
             except ValueError:
-                return False
-            return any(a in n for n in TRUSTED_PROXIES) or any(a in n for n in CF_NETS)
+                return None
+
+        def in_nets(v, nets):
+            a = addr(v)
+            return a is not None and any(a in n for n in nets)
 
         ip = norm(self.client_address[0])
         if not self.from_proxy():
             return ip
-        # 从右往左跳过信任的反代，第一个不信任的就是客户端
-        for hop in reversed([norm(x) for x in self.headers.get("X-Forwarded-For", "").split(",") if x.strip()]):
-            if not trusted(hop):
-                return hop
-        real = norm(self.headers.get("X-Real-IP", ""))
-        return real if real else ip
+        # 从右往左跳过信任的反代（NPM 等），第一个不是反代的就是连到反代的那一方
+        hop = ""
+        for h in reversed([norm(x) for x in self.headers.get("X-Forwarded-For", "").split(",") if x.strip()]):
+            if not in_nets(h, TRUSTED_PROXIES):
+                hop = h
+                break
+        if not hop:
+            hop = norm(self.headers.get("X-Real-IP", "")) or ip
+        # 连到反代的是 Cloudflare 节点：真实 IP 取 Cloudflare 填的 CF-Connecting-IP（Cloudflare 会覆盖客户端自带的同名头）。
+        # 不再往左读 X-Forwarded-For：那部分客户端可以随便填（例如通过 Cloudflare Workers 转发时）
+        if CF_NETS and in_nets(hop, CF_NETS):
+            cip = norm(self.headers.get("CF-Connecting-IP", ""))
+            if addr(cip) is not None:
+                return cip
+        return hop
 
     def session_cookie(self, sid=None):
         secure = "; Secure" if REQUIRE_HTTPS or self.forwarded_https() else ""
