@@ -1018,9 +1018,10 @@ def latency_series(conn, sid, qs, now):
         t[0] += r["s"]; t[1] += r["l"]; t[2] += r["rs"]; t[3] += r["rn"]; t[4] += r["js"]; t[5] += r["e"]
     for t in tasks:
         pts, s = series.get(t["id"], []), tot.get(t["id"])
-        last = next((p[1] for p in reversed(pts) if p[1] is not None), None)
+        # “当前”取最后一个时间桶：最近一次全部丢包时显示超时，而不是沿用更早的延迟
         t["points"] = pts
-        t["stats"] = {"last": last,
+        t["stats"] = {"last": pts[-1][1] if pts else None,
+                      "last_loss": pts[-1][2] if pts else None,
                       "avg": s[2] / s[3] if s and s[3] else None,
                       "loss": s[1] / s[0] * 100 if s and s[0] else None,
                       "jitter": s[4] / s[3] if s and s[3] else None,
@@ -1228,6 +1229,17 @@ def apply_rule_change(conn, sid, now):
     ensure_cycle(conn, srv, now)
 
 
+def prune_latency(now):
+    """删除 30 天前的延迟数据：按（服务器, 任务）分别删，走主键索引，不用全表扫描（满载时有上千万行）"""
+    cut = now - LATENCY_KEEP_DAYS * 86400
+    with txn() as conn:
+        # 所有（服务器, 任务）组合都清：取消勾选后留下的旧数据也会按时删掉
+        pairs = conn.execute("SELECT s.id, t.id FROM servers s, latency_tasks t").fetchall()
+    for sid, tid in pairs:
+        with txn() as conn:                     # 每组单独提交，不长时间占着数据库锁
+            conn.execute("DELETE FROM latency_minute WHERE server_id=? AND task_id=? AND ts<?", (sid, tid, cut))
+
+
 def maintenance_loop():
     last_ckpt = 0
     while True:
@@ -1238,9 +1250,10 @@ def maintenance_loop():
                     ensure_cycle(conn, srv, now)
                 conn.execute("DELETE FROM traffic_hourly WHERE ts<?", (now - HOURLY_KEEP_DAYS * 86400,))
                 conn.execute("DELETE FROM metrics_minute WHERE ts<?", (now - METRICS_KEEP_DAYS * 86400,))
-                conn.execute("DELETE FROM latency_minute WHERE ts<?", (now - LATENCY_KEEP_DAYS * 86400,))
+
             # 每小时收缩一次 WAL 文件并更新查询统计，长期运行也不会越来越大、越来越慢
             if now - last_ckpt >= 3600:
+                prune_latency(now)
                 with txn() as conn:
                     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                     conn.execute("PRAGMA optimize")
@@ -1973,7 +1986,10 @@ class Handler(BaseHTTPRequestHandler):
                 with txn() as conn:
                     set_setting(conn, "theme", b["theme"])
             if "offline_notify" in b or "offline_after" in b:
-                set_notify(bool(b["offline_notify"]) if "offline_notify" in b else None, b.get("offline_after"))
+                v = b.get("offline_notify")
+                if "offline_notify" in b and v not in (True, False, 0, 1, "0", "1"):
+                    raise ValueError("通知开关无效")
+                set_notify(v in (True, 1, "1") if "offline_notify" in b else None, b.get("offline_after"))
             return self.send_json(200, {"ok": True, "interval": REPORT_INTERVAL, "idle_interval": IDLE_INTERVAL,
                                         "site_name": get_site_name(), **self.notify_meta()})
         if path == "/api/notify/test" and method == "POST":

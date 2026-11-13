@@ -109,8 +109,9 @@ info_json() {
 # ---- 延迟监测 ----
 # 输出“发出 收到 平均ms 抖动ms 最大ms”；收到为 -1 表示探测本身出错（没有 ping、没有权限等）
 probe_icmp() {
-  case "$1" in *:*) f=-6 ;; *) f=-4 ;; esac
-  ping "$f" -n -q -c 5 -i 1 -W 2 -- "$1" 2>/dev/null | awk '
+  # 字面 IP 指定协议族；域名交给 ping 自己选（纯 IPv6 的机器也能 ping 域名）
+  case "$1" in *:*) f=-6 ;; *[!0-9.]*) f="" ;; *) f=-4 ;; esac
+  $TMO ping $f -n -q -c 5 -i 1 -W 2 -- "$1" 2>/dev/null | awk '
     /packets transmitted/ {s=$1; r=$4}
     /(rtt|round-trip)/ {split($0, a, "="); gsub(/[ a-z]/, "", a[2]); n=split(a[2], v, "/"); avg=v[2]; mx=v[3]; if (n >= 4) jit=v[4]}
     END { if (s == "") print "0 -1 0 0 0"; else printf "%d %d %s %s %s\n", s, r, (avg == "" ? 0 : avg), (jit == "" ? 0 : jit), (mx == "" ? 0 : mx) }'
@@ -122,7 +123,7 @@ probe_tcp() {
   h=$1; case "$h" in *:*) h="[$h]" ;; esac
   out="" k=0
   while [ $k -lt 3 ]; do
-    t=$(curl -s -o /dev/null --connect-timeout 2 -m 2 -w '%{time_connect}' "telnet://$h:$2" </dev/null 2>/dev/null)
+    t=$($TMO curl -s -o /dev/null --connect-timeout 2 -m 2 -w '%{time_connect}' "telnet://$h:$2" </dev/null 2>/dev/null)
     out="$out ${t:-0}"; k=$((k + 1))
   done
   printf '%s\n' "$out" | awk '{ for (i = 1; i <= NF; i++) { s++; v = $i * 1000; if (v > 0) { r++; sum += v; if (v > mx) mx = v;
@@ -133,12 +134,18 @@ probe_tcp() {
 run_probe() {   # id 类型 主机 端口（在后台子进程里运行）
   IFS=' 	
 '
+  run="$LAT_DIR/.run.$1"
+  : > "$run"
+  trap 'rm -f "$run"' EXIT
   if [ "$2" = tcp ]; then res=$(probe_tcp "$3" "$4"); else res=$(probe_icmp "$3"); fi
   set -- "$1" $res
   [ $# -eq 6 ] || return
   f="$LAT_DIR/$(date +%s).$1"
   printf '[%s,%s,%s,%s,%s,%s]' "$1" "$2" "$3" "$4" "$5" "$6" > "$f.tmp" && mv "$f.tmp" "$f"
 }
+
+# 单次探测最多 25 秒（DNS 卡住时也不会无限挂着）；没有 timeout 命令就不限制
+TMO=""; command -v timeout >/dev/null 2>&1 && TMO="timeout 25"
 
 # 后台探测循环：每 5 秒看一次哪些目标到时间了，到了就在后台跑一次
 prober() {
@@ -157,6 +164,8 @@ prober() {
         case "$host" in -*|*[!A-Za-z0-9.:-]*|"") continue ;; esac
         [ "$iv" -ge 30 ] && [ "$iv" -le 300 ] || continue
         eval "last=\${last_$id:-0}"
+        # 上一次还没测完（例如 DNS 卡住）就不再叠加；标记超过 2 分钟视为残留
+        if [ -f "$LAT_DIR/.run.$id" ] && [ -z "$(find "$LAT_DIR/.run.$id" -mmin +2 2>/dev/null)" ]; then continue; fi
         if [ $((now - last)) -ge "$iv" ]; then
           eval "last_$id=$now"
           run_probe "$id" "$kind" "$host" "$port" &

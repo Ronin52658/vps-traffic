@@ -10,7 +10,7 @@ set -e
 
 # agent.sh 的 SHA256：agent.sh 每次修改后用 sh tools/pin_agent.sh hash 更新
 REPO="Ronin52658/vps-traffic"
-AGENT_SHA256="c5804c0d25cc74581be6cb69247da8996fa558cc86e1b7b3e0a62dea0ed07d58"
+AGENT_SHA256="7c258411925041fe7d775bbb8b04cde37ae455e44abbb594733975ac2d7b9207"
 
 SERVER="" TOKEN="" IFACE="auto" INTERVAL=3 UNINSTALL=0 REF="" AGENT_FILE="" MIRROR=""
 while [ $# -gt 0 ]; do

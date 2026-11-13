@@ -1424,7 +1424,7 @@ function renderLatency() {
   const cards = d.tasks.map((t, i) => {
     const s = t.stats, off = LAT.hidden.has(t.id);
     const v = s.error ? `<div class="v bad">无法探测${t.kind === "icmp" ? "（这台 VPS 不允许 ping，可改用 TCP）" : ""}</div>`
-      : `<div class="v num">${fms(s.last)} · ${s.loss == null ? "—" : s.loss.toFixed(2) + "%"} · ${s.jitter == null ? "—" : s.jitter.toFixed(2)}</div>`;
+      : `<div class="v num${s.last == null && s.last_loss >= 100 ? " bad" : ""}">${s.last == null && s.last_loss >= 100 ? "超时" : fms(s.last)} · ${s.loss == null ? "—" : s.loss.toFixed(2) + "%"} · ${s.jitter == null ? "—" : s.jitter.toFixed(2)}</div>`;
     return `<button class="lat-card${off ? " off" : ""}" data-id="${t.id}" title="${esc(latTarget(t))}，每 ${t.interval} 秒测一次。点卡片显示/隐藏曲线">
       <i class="c" style="background:${latColor(i)}"></i><b>${esc(t.name)}</b>${v}<span class="tip">ⓘ</span></button>`;
   }).join("");
