@@ -1,13 +1,14 @@
 #!/bin/sh
 # 面板一键部署 / 升级：在仓库目录里以 root 运行。面板强制 HTTPS，只能经反代（如 Nginx Proxy Manager）访问
 #   sh install_panel.sh --domain traffic.example.com [--port 8080] [--proxy 127.0.0.1,::1,172.16.0.0/12]
-#                       [--listen 0.0.0.0] [--password 你的密码] [--tz Asia/Shanghai]
+#                       [--listen 0.0.0.0] [--cloudflare on] [--password 你的密码] [--tz Asia/Shanghai]
+#   --cloudflare on：域名开了 Cloudflare 代理（橙色云朵）时用，面板才能看到真实 IP
 #   升级时不用再写 --domain 等参数，沿用原来的设置
 #   sh install_panel.sh --password 新密码       （只想重设密码时也可以这样用）
 #   sh install_panel.sh --ask-password          （交互输入密码，不留在历史记录里）
 #   sh install_panel.sh --uninstall             （保留数据库 /var/lib/vps-traffic-panel）
 set -e
-PORT="" PASSWORD="" TZNAME="" UNINSTALL=0 DOMAIN="" PROXIES="" LISTEN=""
+PORT="" PASSWORD="" TZNAME="" UNINSTALL=0 DOMAIN="" PROXIES="" LISTEN="" CF=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --ask-password)
@@ -18,6 +19,7 @@ while [ $# -gt 0 ]; do
     --domain) DOMAIN=$2; shift 2 ;;
     --proxy) PROXIES=$2; shift 2 ;;
     --listen) LISTEN=$2; shift 2 ;;
+    --cloudflare) CF=$2; shift 2 ;;
     --password) PASSWORD=$2; shift 2 ;;
     --tz) TZNAME=$2; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
@@ -52,6 +54,7 @@ if [ -f "$SVC" ]; then
   [ -n "$TZNAME" ] || TZNAME=$(sed -n 's/^Environment=VT_TZ=//p' "$SVC" | head -1)
   [ -n "$PROXIES" ] || PROXIES=$(sed -n 's/^Environment=VT_TRUSTED_PROXIES=//p' "$SVC" | head -1)
   [ -n "$LISTEN" ] || LISTEN=$(sed -n 's/^Environment=VT_LISTEN=//p' "$SVC" | head -1)
+  [ -n "$CF" ] || CF=$(sed -n 's/^Environment=VT_CLOUDFLARE=//p' "$SVC" | head -1)
   OLD_URL=$(sed -n 's/^Environment=VT_PUBLIC_URL=//p' "$SVC" | head -1)
   OLD_TG_TOKEN=$(sed -n 's/^Environment=VT_TG_TOKEN=//p' "$SVC" | head -1)
   OLD_TG_CHAT=$(sed -n 's/^Environment=VT_TG_CHAT=//p' "$SVC" | head -1)
@@ -60,6 +63,7 @@ PORT=${PORT:-8080}
 TZNAME=${TZNAME:-Asia/Shanghai}
 PROXIES=${PROXIES:-127.0.0.1,::1,172.16.0.0/12}
 LISTEN=${LISTEN:-0.0.0.0}
+case "$CF" in on|1|yes|true) CF=1 ;; ""|off|0|no|false) CF=0 ;; *) echo "--cloudflare 只能是 on 或 off"; exit 1 ;; esac
 
 # 面板域名：强制 HTTPS 后必须有。升级时沿用原来的；示例值不算
 DOMAIN=${DOMAIN#https://}; DOMAIN=${DOMAIN#http://}; DOMAIN=${DOMAIN%%/*}; DOMAIN=${DOMAIN%:443}
@@ -122,6 +126,7 @@ sed -e "s/^Environment=VT_PORT=.*/Environment=VT_PORT=$PORT/" \
     -e "s#^Environment=VT_LISTEN=.*#Environment=VT_LISTEN=$LISTEN#" \
     -e "s#^Environment=VT_PUBLIC_URL=.*#Environment=VT_PUBLIC_URL=$PUBLIC_URL#" \
     -e "s#^Environment=VT_TRUSTED_PROXIES=.*#Environment=VT_TRUSTED_PROXIES=$PROXIES#" \
+    -e "s#^Environment=VT_CLOUDFLARE=.*#Environment=VT_CLOUDFLARE=$CF#" \
     "$SRC/vps-traffic-panel.service" > "$SVC"
 chmod 644 "$SVC"
 

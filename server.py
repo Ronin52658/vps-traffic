@@ -9,6 +9,7 @@ VPS 流量监控面板 - 服务端（仅用 Python 标准库，Python 3.9+）
   VT_DB          SQLite 路径，默认与本文件同目录的 traffic.db
   VT_TZ          计算日统计与重置点的时区，默认 Asia/Shanghai
   VT_PUBLIC_URL  面板对外地址，例如 https://traffic.example.com。设置后只接受 Host 为该域名的请求
+  VT_CLOUDFLARE  域名开了 Cloudflare 代理（橙色云朵）时设为 1，面板才能拿到访客和 Agent 的真实 IP
   VT_REQUIRE_HTTPS 默认 1：只接受经信任反代（VT_TRUSTED_PROXIES）转发、且 X-Forwarded-Proto 为 https
                  的请求，直接用 http://IP:端口 访问一律拒绝（网页和 Agent 上报都是）。
                  设为 0 可临时关闭（不建议）
@@ -113,6 +114,17 @@ def _parse_proxies(v):
 
 
 TRUSTED_PROXIES = _parse_proxies(os.environ.get("VT_TRUSTED_PROXIES", "127.0.0.1,::1"))
+
+# 域名开了 Cloudflare 代理（橙色云朵）时：请求经 Cloudflare → NPM → 面板，NPM 在 X-Forwarded-For 末尾追加的是
+# Cloudflare 节点的 IP。开启 VT_CLOUDFLARE=1 后，取真实 IP 时把 Cloudflare 的地址也当作“中间一跳”跳过，
+# 拿到的就是访客 / Agent 的真实 IP。这些地址只用于识别转发链，不会被当作可直连面板的反代。
+# 地址段来自 https://www.cloudflare.com/ips-v4 和 ips-v6；Cloudflare 改了可用 VT_CLOUDFLARE_IPS 覆盖
+CF_DEFAULT = ("173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,"
+              "190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,"
+              "104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,"
+              "2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32")
+CLOUDFLARE = os.environ.get("VT_CLOUDFLARE", "0").strip().lower() in ("1", "true", "yes", "on")
+CF_NETS = _parse_proxies(os.environ.get("VT_CLOUDFLARE_IPS") or CF_DEFAULT) if CLOUDFLARE else []
 
 
 def _load_agent_pin():
@@ -1791,7 +1803,7 @@ class Handler(BaseHTTPRequestHandler):
                 a = ipaddress.ip_address(v)
             except ValueError:
                 return False
-            return any(a in n for n in TRUSTED_PROXIES)
+            return any(a in n for n in TRUSTED_PROXIES) or any(a in n for n in CF_NETS)
 
         ip = norm(self.client_address[0])
         if not self.from_proxy():
@@ -2266,6 +2278,8 @@ def main():
     if REQUIRE_HTTPS:
         print(f"[start] 强制 HTTPS：只接受来自 {os.environ.get('VT_TRUSTED_PROXIES', '127.0.0.1,::1')} "
               f"的 HTTPS 反代请求" + (f"，访问地址 {PUBLIC_URL}" if PUBLIC_URL else ""))
+        if CLOUDFLARE:
+            print("[start] 已开启 Cloudflare：取真实 IP 时跳过 Cloudflare 节点地址")
         if PUBLIC_URL and not PUBLIC_URL.startswith("https://"):
             sys.exit("[error] 已强制 HTTPS，VT_PUBLIC_URL 必须是 https:// 开头")
     httpd.serve_forever()

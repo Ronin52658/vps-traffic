@@ -36,6 +36,7 @@ sh install_panel.sh --domain traffic.example.com --port 8080
 其他参数：
 - `--proxy`：信任的反代地址（逗号分隔的 IP 或网段），默认 `127.0.0.1,::1,172.16.0.0/12`，覆盖本机和 Docker 里的 NPM。NPM 在另一台机器上时，填那台机器的 IP。信任列表里的地址可以绕过 HTTPS 检查、伪造访客 IP，这台机器上还跑着其他不受信任的 Docker 容器时，建议缩小到 NPM 所在的网段（`docker network inspect` 查看）。
 - `--listen`：监听地址，默认 `0.0.0.0`（Docker 里的 NPM 需要能连到）。
+- `--cloudflare on`：域名开了 Cloudflare 代理（橙色云朵）时必须加，否则面板上显示的访客和 VPS 的 IP 都是 Cloudflare 节点的地址，而且会一直变，国旗、登录限流也会跟着出错。开启后面板会跳过转发链里的 Cloudflare 地址，取到真实 IP（伪造的 X-Forwarded-For 不会被采信）。升级时沿用原来的设置，`--cloudflare off` 关闭。Cloudflare 的 SSL 模式要用 Full 或 Full (strict)，用 Flexible 时 Cloudflare 到 NPM 走的是 HTTP，面板会提示“需要 HTTPS”。
 
 重新运行 `install_panel.sh` 即可升级，数据库、密码、端口、时区、反代和 Telegram 设置都会保留。从旧版（root 运行、数据库在 `/opt/vps-traffic-panel`）升级时，数据库会自动搬到 `/var/lib/vps-traffic-panel`。卸载：`sh install_panel.sh --uninstall`（数据库保留）。
 
