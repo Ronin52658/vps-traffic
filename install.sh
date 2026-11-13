@@ -45,7 +45,8 @@ if [ "$UPGRADE" = 1 ]; then
   # 从原来的配置里读（不 source，只按固定格式取值，下面照样校验格式）
   OLD=/etc/vps-traffic/agent.conf
   [ -f "$OLD" ] || { echo "这台还没装过 Agent，请用面板里这台服务器的安装命令"; exit 1; }
-  get() { sed -n "s/^$1=\"\(.*\)\"\$/\1/p" "$OLD" | head -1; }
+  # 带不带双引号都能读（迁移面板时可能手改过这个文件）；读出来的值下面照样校验格式
+  get() { sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*\$/\1/p" "$OLD" | head -1; }
   [ -n "$SERVER" ] || SERVER=$(get SERVER); SERVER=${SERVER%/}
   [ -n "$TOKEN" ] || TOKEN=$(get TOKEN)
   v=$(get IFACE); [ -n "$v" ] && IFACE=$v

@@ -10,6 +10,9 @@
 # 做的事情：读取仓库 main 分支的 agent_pin.json（当前固定的提交和 install.sh 的 SHA256）→
 # 下载该提交的 install.sh 并校验 → 运行 install.sh --upgrade（它会再校验 agent.sh 的 SHA256）。
 # 已经是最新版本时什么都不做；FORCE=1 强制重装。
+# 整个脚本包在 main 函数里、最后一行才调用：用 wget -qO- … | sh 时如果下载中途断开，
+# sh 读到的是不完整的函数定义，什么都不会执行，不会只跑了一半
+main() {
 set -e
 
 REPO="Ronin52658/vps-traffic"
@@ -70,3 +73,6 @@ if [ -n "$MIRROR" ]; then
 else
   sh "$T/install.sh" --ref "$C" --upgrade
 fi
+}
+
+main "$@"
