@@ -213,7 +213,10 @@ save_state() {
 # 读取上次状态：网卡 上次rx 上次tx 未送出rx 未送出tx
 s_ifc="" last_rx="" last_tx="" pend_rx=0 pend_tx=0
 [ -f "$STATE" ] && read -r s_ifc last_rx last_tx pend_rx pend_tx < "$STATE"
-pend_rx=${pend_rx:-0}; pend_tx=${pend_tx:-0}
+# 状态文件损坏（例如断电）时不能带着非数字进算术：dash 会直接报错退出，systemd 重启后又读到同一个坏文件，无限循环
+num_ok() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ ${#1} -le 18 ]; }
+num_ok "$last_rx" && num_ok "$last_tx" || { last_rx="" last_tx=""; }
+num_ok "$pend_rx" && num_ok "$pend_tx" || { pend_rx=0 pend_tx=0; }
 
 HOST=$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9._-')
 ifc="" cpu_t="" cpu_i="" info_at=""
