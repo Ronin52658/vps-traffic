@@ -239,6 +239,7 @@ h3{font-size:15px;margin:0 0 6px}
 
 /* 分组 */
 .grp-bar{margin:0 0 18px;flex-wrap:wrap}
+.grp-bar[hidden]{display:none}   /* .seg 的 display:flex 会盖过 hidden 属性 */
 .grp-bar button{flex:0 0 auto}
 .grp-bar button small{color:var(--muted);font-weight:400;margin-left:4px}
 
@@ -864,8 +865,11 @@ function renderGroupBar() {
   bar.hidden = !GROUPS.length;
   if (!GROUPS.length) return;
   const cnt = g => g ? SERVERS.filter(s => g.servers.includes(s.id)).length : SERVERS.length;
-  bar.innerHTML = [[0, "全部", null], ...GROUPS.map(g => [g.id, g.name, g])].map(([id, n, g]) =>
+  const html = [[0, "全部", null], ...GROUPS.map(g => [g.id, g.name, g])].map(([id, n, g]) =>
     `<button data-g="${id}" class="${GROUP === id ? "on" : ""}">${esc(n)}<small class="num">${cnt(g)}</small></button>`).join("");
+  // 首页每几秒刷新一次：内容没变就不重绘，免得正好点下去时按钮被替换、点击丢失
+  if (bar.dataset.html === html) return;
+  bar.dataset.html = html; bar.innerHTML = html;
   bar.querySelectorAll("button").forEach(b => b.onclick = () => {
     GROUP = +b.dataset.g;
     try { localStorage.setItem("vt-group", String(GROUP)); } catch (e) {}
@@ -1996,10 +2000,13 @@ function startLive() {
   clearInterval(timer);
   timer = setInterval(liveTick, Math.max(2, META.interval || 3) * 1000);
 }
+let groupsAt = 0;
 async function liveTick() {
   if (document.hidden || ticking || $("#mainView").hidden) return;
   ticking = true;
   try {
+    // 分组可能在别的设备上改过，每分钟同步一次
+    if (Date.now() - groupsAt > 60000) { groupsAt = Date.now(); await loadGroups(); }
     await refresh(true);
     if (CUR && $("#sheet").classList.contains("open")) await updateDetailHead();
   } catch (e) {} finally { ticking = false; }
@@ -2010,7 +2017,7 @@ async function showMain() {
   META = await api("/api/meta");
   applySiteName(META.site_name);
   $("#loginView").hidden = true; $("#mainView").hidden = false;
-  await loadGroups();
+  await loadGroups(); groupsAt = Date.now();
   await refresh();
   clearInterval(timer);
   startLive();
