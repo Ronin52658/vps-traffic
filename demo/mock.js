@@ -190,6 +190,7 @@ let loggedIn = false;
   const IV = {interval: 3, idle_interval: 60, site_name: "VPS 流量", theme: theme0, offline_notify: true, offline_after: 180};
 try { loggedIn = Number(localStorage.getItem(LS_KEY) || 0) > Date.now(); } catch (e) {}
 const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.now() + 30 * 86400000)) : localStorage.removeItem(LS_KEY); } catch (e) {} };
+  let GR = null;
   const LT = [
     {id: 1, name: "1.1.1.1", kind: "icmp", host: "1.1.1.1", port: 0, interval: 60, base: 3},
     {id: 2, name: "8.8.8.8", kind: "icmp", host: "8.8.8.8", port: 0, interval: 60, base: 2},
@@ -251,6 +252,24 @@ const keepLogin = on => { try { on ? localStorage.setItem(LS_KEY, String(Date.no
       const s = {id: nextId++, note: "", ...f, anchor: f.anchor || iso(now), token: tok(), hourly: new Map(), cycles: [], created_at: now, last_seen: 0, rate_rx: 0, rate_tx: 0, avg: 0, rxShare: 0.5, fresh: true};
       curCycle(s, now); S.push(s);
       return R(200, {id: s.id, token: s.token});
+    }
+    // ---- 分组
+    if (GR === null) GR = [{id: 1, name: "亚洲", servers: S.slice(0, 2).map(x => x.id)}];
+    if (path === "/api/groups" && method === "GET") return R(200, GR);
+    if (path === "/api/groups" && method === "POST") {
+      const n = String(body.name || "").trim(); if (!n || n.length > 20) return R(400, {error: "分组名称须为 1–20 个字符"});
+      const g = {id: GR.reduce((a, x) => Math.max(a, x.id), 0) + 1, name: n, servers: body.servers || []}; GR.push(g); return R(200, {id: g.id});
+    }
+    if (path === "/api/groups/order") { GR.sort((a, b) => body.ids.indexOf(a.id) - body.ids.indexOf(b.id)); return R(200, {ok: true}); }
+    const gm = path.match(/^\/api\/groups\/(\d+)$/);
+    if (gm) {
+      const i = GR.findIndex(g => g.id === +gm[1]); if (i < 0) return R(404, {error: "分组不存在"});
+      if (method === "DELETE") GR.splice(i, 1); else { GR[i].name = String(body.name || "").trim() || GR[i].name; GR[i].servers = body.servers || []; }
+      return R(200, {ok: true});
+    }
+    if (body && Array.isArray(body.groups) && /^\/api\/servers(\/\d+)?$/.test(path) && method !== "GET") {
+      const sid = +(path.split("/")[3] || nextId);
+      GR.forEach(g => { g.servers = g.servers.filter(x => x !== sid); if (body.groups.includes(g.id)) g.servers.push(sid); });
     }
     // ---- 延迟监测（演示数据：按任务和时间生成的稳定伪随机曲线）
     if (path === "/api/latency" && method === "GET") return R(200, {tasks: LT, intervals: [30, 60, 120, 300]});

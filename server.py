@@ -72,6 +72,7 @@ METRICS_KEEP_DAYS = 7           # 系统监控（CPU/内存等）分钟数据保
 LATENCY_KEEP_DAYS = 30          # 延迟监测分钟数据保留天数
 LATENCY_INTERVALS = (30, 60, 120, 300)   # 可选的探测间隔（秒）
 MAX_LATENCY_TASKS = 50
+MAX_GROUPS = 50
 MAX_LAT_ITEMS = 300             # 单次上报最多带多少条延迟结果
 HOURLY_KEEP_DAYS = 400          # 小时明细保留天数；周期记录永久保留
 OFFLINE_AFTER = 180             # 超过几秒没上报视为离线（可在“设置”里改，60–3600 秒）
@@ -231,6 +232,16 @@ CREATE TABLE IF NOT EXISTS metrics_minute(
   rx INTEGER NOT NULL DEFAULT 0,
   tx INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(server_id, ts)
+);
+CREATE TABLE IF NOT EXISTS server_groups(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  sort INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS group_members(
+  group_id INTEGER NOT NULL REFERENCES server_groups(id) ON DELETE CASCADE,
+  server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY(group_id, server_id)
 );
 CREATE TABLE IF NOT EXISTS latency_tasks(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -949,6 +960,43 @@ def clean_latency_input(b):
     return {"name": name or host, "kind": kind, "host": host, "port": port, "interval": interval}, sorted(set(ids))
 
 
+# ---------------------------------------------------------------- 分组（一台服务器可以在多个分组里）
+
+def clean_group_input(b):
+    if isinstance(b.get("name"), (dict, list)):
+        raise ValueError("分组名称格式错误")
+    name = re.sub(r"[\x00-\x1f<>]", "", str(b.get("name") or "")).strip()
+    if not 1 <= len(name) <= 20:
+        raise ValueError("分组名称须为 1–20 个字符")
+    ids = b.get("servers", [])
+    if not isinstance(ids, list) or len(ids) > 10000 or not all(type(i) is int and 0 < i < 2 ** 62 for i in ids):
+        raise ValueError("服务器列表无效")
+    return name, sorted(set(ids))
+
+
+def list_groups(conn):
+    groups = [{"id": r[0], "name": r[1], "servers": []} for r in conn.execute("SELECT id, name FROM server_groups ORDER BY sort, id")]
+    idx = {g["id"]: g for g in groups}
+    for gid, sid in conn.execute("SELECT group_id, server_id FROM group_members ORDER BY server_id"):
+        if gid in idx:
+            idx[gid]["servers"].append(sid)
+    return groups
+
+
+def set_group_members(conn, gid, ids):
+    conn.execute("DELETE FROM group_members WHERE group_id=?", (gid,))
+    conn.executemany("INSERT OR IGNORE INTO group_members(group_id, server_id) SELECT ?, id FROM servers WHERE id=?",
+                     [(gid, i) for i in ids])
+
+
+def set_server_groups(conn, sid, ids):
+    if not isinstance(ids, list) or len(ids) > MAX_GROUPS * 2 or not all(type(i) is int and 0 < i < 2 ** 62 for i in ids):
+        raise ValueError("分组列表无效")
+    conn.execute("DELETE FROM group_members WHERE server_id=?", (sid,))
+    conn.executemany("INSERT OR IGNORE INTO group_members(group_id, server_id) SELECT id, ? FROM server_groups WHERE id=?",
+                     [(sid, g) for g in set(ids)])
+
+
 def latency_tasks(conn):
     tasks = [dict(r) for r in conn.execute("SELECT id, name, kind, host, port, interval FROM latency_tasks ORDER BY sort, id")]
     assign = collections.defaultdict(list)
@@ -1448,6 +1496,16 @@ def normalize_restored(conn):
     conn.execute("UPDATE cycles SET alert_level=0 WHERE alert_level NOT IN (0,80,95,100)")
     conn.execute("""DELETE FROM traffic_hourly WHERE typeof(server_id)!='integer' OR server_id NOT IN (SELECT id FROM servers)
                       OR typeof(ts)!='integer' OR typeof(rx)!='integer' OR typeof(tx)!='integer' OR rx<0 OR tx<0""")
+    # 分组：名称按正常新增时的规则校验，成员只能指向存在的分组和服务器
+    for r in conn.execute("SELECT id, name, sort FROM server_groups").fetchall():
+        try:
+            name, _ = clean_group_input({"name": r["name"]})
+        except ValueError:
+            conn.execute("DELETE FROM server_groups WHERE id=?", (r["id"],))
+            continue
+        conn.execute("UPDATE server_groups SET name=?, sort=? WHERE id=?", (name, _int_in(r["sort"], 0, 2 ** 62, 0), r["id"]))
+    conn.execute("""DELETE FROM group_members WHERE typeof(group_id)!='integer' OR typeof(server_id)!='integer'
+                      OR group_id NOT IN (SELECT id FROM server_groups) OR server_id NOT IN (SELECT id FROM servers)""")
     # 延迟监测：任务字段按正常新增时的规则校验，不合格的任务连同数据删除
     for r in conn.execute("SELECT * FROM latency_tasks").fetchall():
         try:
@@ -1603,6 +1661,7 @@ ICONS = {"/favicon.svg": ("icons/favicon.svg", "image/svg+xml"),
          "/icon-512.png": ("icons/icon-512.png", "image/png")}
 
 ROUTE_SRV = re.compile(r"^/api/servers/(\d{1,15})(?:/(daily|hourly|cycles|reset|token|metrics|latency))?$")
+ROUTE_GRP = re.compile(r"^/api/groups/(\d{1,15})$")
 ROUTE_LAT = re.compile(r"^/api/latency/(\d{1,15})$")
 ROUTE_LAT_SRV = re.compile(r"^/api/latency/server/(\d{1,15})$")
 
@@ -1873,6 +1932,42 @@ class Handler(BaseHTTPRequestHandler):
     def notify_meta(self):
         return {"offline_notify": OFFLINE_NOTIFY, "offline_after": OFFLINE_AFTER, "offline_effective": offline_after()}
 
+    def api_groups(self, method, path):
+        """分组：首页按分组切换查看；一台服务器可以属于多个分组"""
+        if path == "/api/groups" and method == "GET":
+            with txn() as conn:
+                return self.send_json(200, list_groups(conn))
+        if path == "/api/groups" and method == "POST":
+            name, ids = clean_group_input(self.read_json())
+            with txn() as conn:
+                if conn.execute("SELECT COUNT(*) FROM server_groups").fetchone()[0] >= MAX_GROUPS:
+                    raise ValueError(f"最多 {MAX_GROUPS} 个分组")
+                cur = conn.execute("INSERT INTO server_groups(name, sort) VALUES(?, (SELECT COALESCE(MAX(sort),0)+1 FROM server_groups))", (name,))
+                set_group_members(conn, cur.lastrowid, ids)
+                return self.send_json(200, {"id": cur.lastrowid})
+        if path == "/api/groups/order" and method == "POST":
+            ids = self.read_json().get("ids")
+            if not isinstance(ids, list) or len(ids) > MAX_GROUPS * 2 or not all(type(i) is int and 0 < i < 2 ** 62 for i in ids):
+                raise ValueError("排序数据无效")
+            with txn() as conn:
+                for n, gid in enumerate(ids):
+                    conn.execute("UPDATE server_groups SET sort=? WHERE id=?", (n, gid))
+            return self.send_json(200, {"ok": True})
+        m = ROUTE_GRP.match(path)
+        if m and method in ("PUT", "DELETE"):
+            gid = int(m.group(1))
+            with txn() as conn:
+                if not conn.execute("SELECT 1 FROM server_groups WHERE id=?", (gid,)).fetchone():
+                    return self.send_json(404, {"error": "分组不存在"})
+                if method == "DELETE":
+                    conn.execute("DELETE FROM server_groups WHERE id=?", (gid,))   # 只删分组，服务器不受影响
+                    return self.send_json(200, {"ok": True})
+                name, ids = clean_group_input(self.read_json())
+                conn.execute("UPDATE server_groups SET name=? WHERE id=?", (name, gid))
+                set_group_members(conn, gid, ids)
+            return self.send_json(200, {"ok": True})
+        return self.send_json(404, {"error": "not found"})
+
     def api_latency(self, method, path, now):
         """延迟监测任务管理：任务视图（每个目标选哪些服务器）和服务器视图（每台服务器测哪些目标）"""
         if path == "/api/latency" and method == "GET":
@@ -2021,6 +2116,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True})
         if path.startswith("/api/latency"):
             return self.api_latency(method, path, now)
+        if path.startswith("/api/groups"):
+            return self.api_groups(method, path)
         if path == "/api/order" and method == "POST":
             ids = self.read_json().get("ids")
             if (not isinstance(ids, list) or len(ids) > MAX_ORDER_IDS
@@ -2036,7 +2133,10 @@ class Handler(BaseHTTPRequestHandler):
                     rows = conn.execute("SELECT * FROM servers ORDER BY sort, id").fetchall()
                     return self.send_json(200, [server_summary(conn, r, now) for r in rows])
             if method == "POST":
-                f = clean_server_input(self.read_json())
+                b = self.read_json()
+                f = clean_server_input(b)
+                if "groups" in b and not (isinstance(b["groups"], list) and all(type(i) is int and 0 < i < 2 ** 62 for i in b["groups"])):
+                    raise ValueError("分组列表无效")
                 f.setdefault("anchor", None)
                 if f["reset_type"] == "interval" and not f["anchor"]:
                     f["anchor"] = datetime.fromtimestamp(now, TZ).date().isoformat()
@@ -2051,6 +2151,8 @@ class Handler(BaseHTTPRequestHandler):
                                  (f.get("country", ""), f.get("notify_offline", 1), cur.lastrowid))
                     srv = conn.execute("SELECT * FROM servers WHERE id=?", (cur.lastrowid,)).fetchone()
                     ensure_cycle(conn, srv, now)
+                    if b.get("groups"):
+                        set_server_groups(conn, srv["id"], b["groups"])
                     return self.send_json(200, {"id": srv["id"], "token": token})
         m = ROUTE_SRV.match(path)
         if not m:
@@ -2065,11 +2167,14 @@ class Handler(BaseHTTPRequestHandler):
                 d["token"] = srv["token"]
                 return self.send_json(200, d)
             if sub is None and method == "PUT":
-                f = clean_server_input(self.read_json(), partial=True)
+                b = self.read_json()
+                f = clean_server_input(b, partial=True)
                 if f:
                     sets = ", ".join(f"{k}=?" for k in f)
                     conn.execute(f"UPDATE servers SET {sets} WHERE id=?", (*f.values(), sid))
                     apply_rule_change(conn, sid, now)
+                if "groups" in b:
+                    set_server_groups(conn, sid, b["groups"])
                 return self.send_json(200, {"ok": True})
             if sub is None and method == "DELETE":
                 conn.execute("DELETE FROM servers WHERE id=?", (sid,))

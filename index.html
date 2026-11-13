@@ -237,6 +237,11 @@ h3{font-size:15px;margin:0 0 6px}
 .btn.sq{padding:5px 10px;min-width:36px}
 .order .actions{flex-wrap:nowrap;gap:8px}
 
+/* 分组 */
+.grp-bar{margin:0 0 18px;flex-wrap:wrap}
+.grp-bar button{flex:0 0 auto}
+.grp-bar button small{color:var(--muted);font-weight:400;margin-left:4px}
+
 /* 延迟监测 */
 .lat-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px}
 .lat-bar .seg{flex:1 1 auto;flex-wrap:wrap}
@@ -296,6 +301,7 @@ h3{font-size:15px;margin:0 0 6px}
       <button class="btn" id="settingsBtn">设置</button>
     </div>
   </header>
+  <div class="seg grp-bar" id="groupBar" hidden></div>
   <div class="tiles num" id="tilesTop"></div>
   <div class="legend">
     <span><i style="background:var(--rx)"></i>下行</span>
@@ -457,17 +463,42 @@ function card(s) {
     </button>`;
 }
 
+/* ---------- 分组：首页只显示当前分组的服务器，顶部汇总也只算这些 ---------- */
+let GROUPS = [], GROUP = 0;
+try { GROUP = +localStorage.getItem("vt-group") || 0; } catch (e) {}
+const curGroup = () => GROUPS.find(g => g.id === GROUP) || null;
+const visibleServers = () => { const g = curGroup(); return g ? SERVERS.filter(s => g.servers.includes(s.id)) : SERVERS; };
+async function loadGroups() {
+  try { GROUPS = await api("/api/groups"); } catch (e) { GROUPS = []; }
+  if (GROUP && !curGroup()) GROUP = 0;
+  renderGroupBar();
+}
+function renderGroupBar() {
+  const bar = $("#groupBar"); if (!bar) return;
+  bar.hidden = !GROUPS.length;
+  if (!GROUPS.length) return;
+  const cnt = g => g ? SERVERS.filter(s => g.servers.includes(s.id)).length : SERVERS.length;
+  bar.innerHTML = [[0, "全部", null], ...GROUPS.map(g => [g.id, g.name, g])].map(([id, n, g]) =>
+    `<button data-g="${id}" class="${GROUP === id ? "on" : ""}">${esc(n)}<small class="num">${cnt(g)}</small></button>`).join("");
+  bar.querySelectorAll("button").forEach(b => b.onclick = () => {
+    GROUP = +b.dataset.g;
+    try { localStorage.setItem("vt-group", String(GROUP)); } catch (e) {}
+    renderList();
+  });
+}
+
 function renderTiles() {
-  const on = SERVERS.filter(s => s.online), sum = f => on.reduce((a, s) => a + (f(s) || 0), 0);
+  const SV = visibleServers(), g = curGroup(), scope = g ? `“${esc(g.name)}”合计` : "全部服务器合计";
+  const on = SV.filter(s => s.online), sum = f => on.reduce((a, s) => a + (f(s) || 0), 0);
   const sys = on.filter(s => s.sys);
   const mu = sys.reduce((a, s) => a + s.sys.mem_used, 0), mt = sys.reduce((a, s) => a + s.sys.mem_total, 0);
   const du = sys.reduce((a, s) => a + s.sys.disk_used, 0), dt = sys.reduce((a, s) => a + s.sys.disk_total, 0);
-  const tr = SERVERS.reduce((a, s) => a + s.today.rx, 0), tt = SERVERS.reduce((a, s) => a + s.today.tx, 0);
+  const tr = SV.reduce((a, s) => a + s.today.rx, 0), tt = SV.reduce((a, s) => a + s.today.tx, 0);
   const split = t => { const m = t.match(/^([\d.]+) (.+)$/); return m ? `${m[1]}<em>${m[2]}</em>` : t; };
   const tiles = [
-    ["在线", `${on.length}<em>台</em>`, "", `共 ${SERVERS.length} 台`],
-    ["实时下行", split(fr(sum(s => s.rate_rx))), "rx", "全部服务器合计"],
-    ["实时上行", split(fr(sum(s => s.rate_tx))), "tx", "全部服务器合计"],
+    ["在线", `${on.length}<em>台</em>`, "", `共 ${SV.length} 台`],
+    ["实时下行", split(fr(sum(s => s.rate_rx))), "rx", scope],
+    ["实时上行", split(fr(sum(s => s.rate_tx))), "tx", scope],
     ["今日流量", split(fb(tr + tt)), "", `↓ ${fb(tr)}　↑ ${fb(tt)}`],
     ["内存用量", split(fb(mu)), "", `共 ${fb(mt)}`],
     ["硬盘用量", split(fb(du)), "", `共 ${fb(dt)}`],
@@ -476,8 +507,10 @@ function renderTiles() {
 }
 
 function renderList() {
-  const el = $("#list");
-  el.innerHTML = SERVERS.length ? SERVERS.map(card).join("")
+  const el = $("#list"), SV = visibleServers();
+  renderGroupBar();
+  el.innerHTML = SV.length ? SV.map(card).join("")
+    : SERVERS.length ? `<div class="card empty">“${esc(curGroup().name)}”分组里还没有服务器。到“设置”→“分组”里添加。</div>`
     : `<div class="card empty">还没有服务器。打开“设置”，点击“新增服务器”获取安装命令，在 VPS 上运行后即开始统计。</div>`;
   el.querySelectorAll(".row").forEach(b => b.onclick = () => openDetail(+b.dataset.id));
   renderTiles();
@@ -845,6 +878,8 @@ function serverForm(s = {}) {
       <label>间隔天数<input name="interval_days" type="number" min="1" max="3650" value="${+s.interval_days || 30}"></label>
       <label>起算日期<input name="anchor" type="date" value="${s.anchor || ""}"></label>
     </div>
+    ${GROUPS.length ? `<div><span class="hint">所属分组（可多选）</span>
+      <div class="checks" id="srvGroups" style="margin-top:6px">${GROUPS.map(g => `<label><input type="checkbox" value="${g.id}" ${s.id && g.servers.includes(s.id) ? "checked" : (!s.id && GROUP === g.id ? "checked" : "")}>${esc(g.name)}</label>`).join("")}</div></div>` : ""}
     <div class="checks" style="grid-template-columns:1fr;max-height:none;padding:0">
       <label><input type="checkbox" name="notify_offline" ${s.notify_offline === false ? "" : "checked"}>离线 / 恢复上线时发送 Telegram 通知</label>
     </div>
@@ -861,6 +896,7 @@ function bindForm(onSubmit) {
     const d = Object.fromEntries(new FormData(f));
     d.quota_gb = +d.quota_gb; d.reset_day = +d.reset_day; d.interval_days = +d.interval_days;
     d.notify_offline = f.notify_offline.checked;
+    if ($("#srvGroups")) d.groups = [...f.querySelectorAll("#srvGroups input:checked")].map(i => +i.value);
     if (!d.anchor) delete d.anchor;
     try { await onSubmit(d); } catch (err) { $("#formErr").textContent = err.message; }
   };
@@ -957,7 +993,7 @@ function tabSettings(s) {
     </div>`;
   bindForm(async d => {
     await api(`/api/servers/${CUR}`, {method: "PUT", body: JSON.stringify(d)});
-    toast("已保存设置"); renderDetail();
+    toast("已保存设置"); await loadGroups(); renderDetail();
   });
   fillAltInstall($("#altBox"), s.token);
   $("#copyBtn").onclick = () => copyText($("#cmd").textContent);
@@ -972,7 +1008,7 @@ function tabSettings(s) {
   };
   $("#delBtn").onclick = async () => {
     if (prompt(`输入服务器名称“${s.name}”确认删除`) !== s.name) return;
-    await api(`/api/servers/${CUR}`, {method: "DELETE"}); toast("已删除服务器"); closeSheet();
+    await api(`/api/servers/${CUR}`, {method: "DELETE"}); toast("已删除服务器"); await loadGroups(); closeSheet();
   };
 }
 
@@ -981,6 +1017,7 @@ function openAdd() {
   openSheet(`${panelTop("新增服务器")}<div class="card" style="margin-top:16px" id="addBody">${serverForm()}</div>`);
   bindForm(async d => {
     const r = await api("/api/servers", {method: "POST", body: JSON.stringify(d)});
+    await loadGroups();
     $("#addBody").innerHTML = `
       <h3>已新增“${esc(d.name)}”</h3>
       <p class="hint">在这台 VPS 上用 root 运行以下命令，大约一分钟后开始出现数据：</p>
@@ -1116,6 +1153,76 @@ function drawLatency() {
     : `<p class="hint" style="padding:16px 0;text-align:center">所选时间范围内没有丢包</p>`;
 }
 
+/* ---------- 分组管理（首页“设置”里进入） ---------- */
+let GEDIT = null;
+async function openGroups() {
+  CUR = null; GEDIT = null;
+  openSheet(`${panelTop("分组")}
+    <p class="hint" style="margin:6px 0 4px">首页顶部按分组切换，汇总（在线、网速、今日流量、内存、硬盘）和服务器列表只算当前分组。一台服务器可以在多个分组里；删除分组不会删除服务器。</p>
+    <div class="lat-bar" style="margin-top:14px;justify-content:flex-end"><button class="btn primary" id="grpAdd">新建分组</button></div>
+    <div id="grpMgr" style="margin-top:18px"></div>`);
+  $("#grpAdd").onclick = () => { GEDIT = {}; renderGroupMgr(); };
+  await loadGroups(); renderGroupMgr();
+}
+function renderGroupMgr() {
+  const el = $("#grpMgr"); if (!el) return;
+  if (GEDIT) return renderGroupForm(el, GEDIT);
+  if (!GROUPS.length) { el.innerHTML = `<div class="card empty">还没有分组，点右上角“新建分组”。<br>例如按地区（香港、日本）、用途（落地、中转）或商家分组。</div>`; return; }
+  el.innerHTML = `<div class="order">${GROUPS.map((g, i) => `
+    <div class="lat-row">
+      <div class="t"><b>${esc(g.name)}</b><small>${g.servers.length} 台：${g.servers.length ? esc(g.servers.map(srvName).join("、")) : "还没有服务器"}</small></div>
+      <span class="actions" style="flex-wrap:nowrap;gap:8px">
+        <button class="btn sq" data-mv="up" data-i="${i}" ${i === 0 ? "disabled" : ""} title="上移" aria-label="上移">↑</button>
+        <button class="btn sq" data-mv="down" data-i="${i}" ${i === GROUPS.length - 1 ? "disabled" : ""} title="下移" aria-label="下移">↓</button>
+        <button class="btn sq" data-edit="${i}">编辑</button>
+      </span>
+    </div>`).join("")}</div>`;
+  el.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => { GEDIT = GROUPS[+b.dataset.edit]; renderGroupMgr(); });
+  el.querySelectorAll("[data-mv]").forEach(b => b.onclick = async () => {
+    const i = +b.dataset.i, list = [...GROUPS], [it] = list.splice(i, 1);
+    list.splice(b.dataset.mv === "up" ? i - 1 : i + 1, 0, it);
+    GROUPS = list; renderGroupMgr(); renderGroupBar();
+    try { await api("/api/groups/order", {method: "POST", body: JSON.stringify({ids: list.map(g => g.id)})}); }
+    catch (e) { toast(e.message); await loadGroups(); renderGroupMgr(); }
+  });
+}
+function renderGroupForm(el, g) {
+  const sel = new Set(g.servers || []);
+  el.innerHTML = `<div class="card"><h3>${g.id ? "编辑分组" : "新建分组"}</h3>
+    <form id="grpForm" style="margin-top:10px">
+      <label>分组名称<input name="name" required maxlength="20" value="${esc(g.name || "")}" placeholder="例如 香港、落地机、Akile"></label>
+      <div>
+        <div class="chart-head" style="margin-bottom:6px"><span class="hint">包含哪些服务器</span>
+          <span class="actions" style="gap:8px"><button type="button" class="btn sq" id="gAll">全选</button><button type="button" class="btn sq" id="gNone">全不选</button></span></div>
+        <div class="checks" id="grpSrv">${SERVERS.map(s => `<label><input type="checkbox" value="${s.id}" ${sel.has(s.id) ? "checked" : ""}><span class="flag">${flag(s.country)}</span>${esc(s.name)}</label>`).join("")
+          || `<p class="hint">还没有服务器</p>`}</div>
+      </div>
+      <p class="err" id="grpErr"></p>
+      <div class="actions">
+        <button class="btn primary" type="submit">保存</button>
+        <button class="btn" type="button" id="gCancel">取消</button>
+        ${g.id ? `<button class="btn danger" type="button" id="gDel" style="margin-left:auto">删除分组</button>` : ""}
+      </div>
+    </form></div>`;
+  const f = $("#grpForm");
+  $("#gAll").onclick = () => f.querySelectorAll("#grpSrv input").forEach(i => i.checked = true);
+  $("#gNone").onclick = () => f.querySelectorAll("#grpSrv input").forEach(i => i.checked = false);
+  $("#gCancel").onclick = () => { GEDIT = null; renderGroupMgr(); };
+  if (g.id) $("#gDel").onclick = async () => {
+    if (!confirm(`删除分组“${g.name}”？里面的服务器不受影响。`)) return;
+    try { await api(`/api/groups/${g.id}`, {method: "DELETE"}); GEDIT = null; toast("已删除分组"); await loadGroups(); renderGroupMgr(); renderList(); }
+    catch (e) { $("#grpErr").textContent = e.message; }
+  };
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const body = {name: f.name.value, servers: [...f.querySelectorAll("#grpSrv input:checked")].map(i => +i.value)};
+    try {
+      await api(g.id ? `/api/groups/${g.id}` : "/api/groups", {method: g.id ? "PUT" : "POST", body: JSON.stringify(body)});
+      GEDIT = null; toast("已保存分组"); await loadGroups(); renderGroupMgr(); renderList();
+    } catch (err) { $("#grpErr").textContent = err.message; }
+  };
+}
+
 /* ---------- 延迟监测：管理测试目标（首页“设置”里进入） ---------- */
 const LATM = {view: "task", data: null, editing: null};
 
@@ -1238,18 +1345,23 @@ function openRange() {
   GRANGE = GRANGE || monthRange(0);
   openSheet(`${panelTop("区间统计")}
     <div class="card" style="margin-top:16px">${rangePicker(GRANGE, presets)}
-      <p class="hint">统计所有服务器在这段时间内的流量，按整天计算，含开始和结束两天。</p></div>
+      <p class="hint">统计${curGroup() ? `“${esc(curGroup().name)}”分组里` : "所有"}服务器在这段时间内的流量，按整天计算，含开始和结束两天。${curGroup() ? "要看全部服务器，先在首页切到“全部”。" : ""}</p></div>
     <div id="gResult"></div>`);
   const run = async r => {
     $("#rErr").textContent = "";
     try {
       const d = await api(`/api/range?start=${r.start}&end=${r.end}`);
       GRANGE = r;
+      const g = curGroup();
+      if (g) {   // 只算当前分组
+        d.servers = d.servers.filter(x => g.servers.includes(x.id));
+        d.rx = d.servers.reduce((a, x) => a + x.rx, 0); d.tx = d.servers.reduce((a, x) => a + x.tx, 0);
+      }
       const sorted = [...d.servers].sort((a, b) => (b.rx + b.tx) - (a.rx + a.tx));
       $("#gResult").innerHTML = `
         <div class="card" style="margin-top:18px">
           <h3 class="num">${rangeLabel(r)}</h3>
-          ${statWells([["全部下行", fb(d.rx), "rx"], ["全部上行", fb(d.tx), "tx"]])}
+          ${statWells([[g ? "分组下行" : "全部下行", fb(d.rx), "rx"], [g ? "分组上行" : "全部上行", fb(d.tx), "tx"]])}
           <div class="table-wrap" style="margin-top:10px">
             <table class="num">
               <thead><tr><th>服务器</th><th>下行</th><th>上行</th><th>合计</th><th>计费用量</th></tr></thead>
@@ -1321,6 +1433,11 @@ function openSettings() {
       <div id="orderList" class="order"></div>
     </div>
     <div class="card">
+      <h3>分组</h3>
+      <p class="hint" style="margin-bottom:12px">把服务器分组后，首页顶部可以切换分组，汇总和列表只显示该分组的服务器。一台服务器可以同时属于多个分组。</p>
+      <button class="btn primary" id="grpMgrBtn">管理分组</button>
+    </div>
+    <div class="card">
       <h3>延迟监测</h3>
       <p class="hint" style="margin-bottom:12px">添加 ping 或 TCP 测试目标，选择由哪些服务器来测，在服务器详情的“延迟”分页查看曲线。</p>
       <button class="btn primary" id="latMgrBtn">管理测试目标</button>
@@ -1387,6 +1504,7 @@ function openSettings() {
 
   $("#addBtn").onclick = openAdd;
   $("#latMgrBtn").onclick = openLatency;
+  $("#grpMgrBtn").onclick = openGroups;
   const ntHint = () => {
     const eff = META.offline_effective || 180, set = META.offline_after || 180;
     $("#ntHint").textContent = eff > set ? `空闲上报间隔较长，实际按 ${Math.round(eff / 60 * 10) / 10} 分钟判定离线（至少是空闲间隔的两倍再加 30 秒）。` : "";
@@ -1506,6 +1624,7 @@ async function showMain() {
   META = await api("/api/meta");
   applySiteName(META.site_name);
   $("#loginView").hidden = true; $("#mainView").hidden = false;
+  await loadGroups();
   await refresh();
   clearInterval(timer);
   startLive();
