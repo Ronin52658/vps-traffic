@@ -292,6 +292,10 @@ SERVER_COLUMNS = {
     "metrics": "TEXT NOT NULL DEFAULT ''",
     "sysinfo": "TEXT NOT NULL DEFAULT ''",
     "public_ip": "TEXT NOT NULL DEFAULT ''",
+    "ip4": "TEXT NOT NULL DEFAULT ''",
+    "ip6": "TEXT NOT NULL DEFAULT ''",
+    "ip4_at": "INTEGER NOT NULL DEFAULT 0",
+    "ip6_at": "INTEGER NOT NULL DEFAULT 0",
     "country": "TEXT NOT NULL DEFAULT ''",
     "geo_ip": "TEXT NOT NULL DEFAULT ''",
     "geo_country": "TEXT NOT NULL DEFAULT ''",
@@ -857,6 +861,25 @@ def parse_info(d):
             "cores": int(cores) if cores is not None else 0, "virt": txt("virt", 32)}
 
 
+IP_FRESH = 86400                # 双栈机器的 IPv4 / IPv6 超过一天没再见到就不显示（例如 IPv6 被撤掉）
+
+
+def note_ip(conn, srv, ip, now):
+    """按地址族分别记下这台机器的公网 IPv4 / IPv6；国旗优先按 IPv4 识别"""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return
+    if a.version == 6 and a.ipv4_mapped:
+        a = a.ipv4_mapped
+    fam = "ip4" if a.version == 4 else "ip6"
+    conn.execute(f"UPDATE servers SET {fam}=?, {fam}_at=? WHERE id=?", (str(a), now, srv["id"]))
+    v4 = str(a) if fam == "ip4" else (srv["ip4"] if srv["ip4"] and now - srv["ip4_at"] <= IP_FRESH else "")
+    cand = v4 or str(a)
+    if cand != srv["geo_ip"]:
+        geo_lookup_async(srv["id"], cand)
+
+
 def handle_report(token, body, ip=""):
     try:
         rx = int(body.get("rx", 0))
@@ -875,6 +898,10 @@ def handle_report(token, body, ip=""):
         srv = conn.execute("SELECT * FROM servers WHERE token=?", (token,)).fetchone()
         if srv is None:
             return 401, {"error": "invalid token"}
+        if body.get("ip_only"):
+            # 双栈机器的 Agent 每 10 分钟分别用 IPv4、IPv6 各发一次，只用来记地址，不碰流量和在线状态
+            note_ip(conn, srv, ip, now)
+            return 200, {"ok": True}
         conn.execute("""INSERT INTO traffic_hourly(server_id,ts,rx,tx) VALUES(?,?,?,?)
                         ON CONFLICT(server_id,ts) DO UPDATE SET rx=rx+excluded.rx, tx=tx+excluded.tx""",
                      (srv["id"], hour, rx, tx))
@@ -891,8 +918,8 @@ def handle_report(token, body, ip=""):
         rr, rt = (rx / gap, tx / gap) if 0.5 <= gap <= 600 else (0, 0)
         conn.execute("UPDATE servers SET last_seen=?, rate_rx=?, rate_tx=?, iface=?, hostname=?, public_ip=? WHERE id=?",
                      (now, rr, rt, iface, host, ip[:64], srv["id"]))
-        if ip and ip != srv["geo_ip"]:
-            geo_lookup_async(srv["id"], ip)
+        if ip:
+            note_ip(conn, srv, ip, now)
         sysd = parse_sys(body.get("sys"))
         if sysd:
             conn.execute("UPDATE servers SET metrics=? WHERE id=?", (json.dumps(sysd), srv["id"]))
@@ -1134,6 +1161,8 @@ def server_summary(conn, srv, now):
         "rate_rx": srv["rate_rx"] if online else 0, "rate_tx": srv["rate_tx"] if online else 0,
         "iface": srv["iface"], "hostname": srv["hostname"],
         "ip": srv["public_ip"], "country": srv["country"] or srv["geo_country"],
+        "ip4": srv["ip4"] if now - srv["ip4_at"] <= IP_FRESH else "",
+        "ip6": srv["ip6"] if now - srv["ip6_at"] <= IP_FRESH else "",
         "country_manual": srv["country"], "country_auto": srv["geo_country"],
         "sys": _loads(srv["metrics"]), "info": _loads(srv["sysinfo"]),
         "today": {"rx": td["rx"], "tx": td["tx"]},
@@ -1464,7 +1493,8 @@ def normalize_restored(conn):
         name = txt(r["name"], 64).strip() or f"server-{r['id']}"
         conn.execute("""UPDATE servers SET name=?, note=?, token=?, quota_gb=?, billing=?, reset_type=?, reset_day=?,
                           interval_days=?, anchor=?, sort=?, created_at=?, last_seen=?, rate_rx=?, rate_tx=?, iface=?,
-                          hostname=?, metrics=?, sysinfo=?, public_ip=?, country=?, geo_ip=?, geo_country=? WHERE id=?""",
+                          hostname=?, metrics=?, sysinfo=?, public_ip=?, country=?, geo_ip=?, geo_country=?,
+                          ip4=?, ip6=?, ip4_at=?, ip6_at=? WHERE id=?""",
                      (name, txt(r["note"], 200), token, q,
                       r["billing"] if r["billing"] in VALID_BILLING else "sum",
                       r["reset_type"] if r["reset_type"] in VALID_RESET else "monthly",
@@ -1474,6 +1504,7 @@ def normalize_restored(conn):
                       num(r["rate_rx"]), num(r["rate_tx"]), txt(r["iface"], 32), txt(r["hostname"], 64),
                       _json_clean(r["metrics"], parse_sys), _json_clean(r["sysinfo"], parse_info),
                       _ip_or_empty(r["public_ip"]), cc(r["country"]), _ip_or_empty(r["geo_ip"]), cc(r["geo_country"]),
+                      _ip_or_empty(r["ip4"]), _ip_or_empty(r["ip6"]), _int_in(r["ip4_at"], 0, 2 ** 40, 0), _int_in(r["ip6_at"], 0, 2 ** 40, 0),
                       r["id"]))
     # 离线通知：开关只能是 0/1；在线状态一律清空，等 Agent 重新上报，避免还原后误报离线/上线
     conn.execute("UPDATE servers SET notify_offline=CASE WHEN notify_offline=0 THEN 0 ELSE 1 END, alive_state=''")

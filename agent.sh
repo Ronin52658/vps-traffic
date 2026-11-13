@@ -64,6 +64,20 @@ post() {
   fi
 }
 
+# 双栈机器：平时上报走哪个协议由系统决定（通常是 IPv6），面板只能看到这一个地址。
+# 每 10 分钟分别强制用 IPv4、IPv6 各发一个只记地址的小请求，面板就能同时显示两个公网 IP。
+# 只有单栈的机器，另一个协议会连不上，直接忽略
+post_ip() {
+  if command -v curl >/dev/null 2>&1; then
+    printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" |
+      curl "-$1" -fsS -m 10 -K - -X POST -H "Content-Type: application/json" \
+        -d '{"ip_only":1}' "$SERVER/api/report" >/dev/null 2>&1
+  else
+    wget "-$1" -q -T 10 -O /dev/null --header="Content-Type: application/json" \
+      --post-data='{"ip_only":1}' "$SERVER/api/report" >/dev/null 2>&1
+  fi
+}
+
 # ---- 系统状态 ----
 # /proc/stat 第一行：返回 “总时间 空闲时间”
 read_cpu() { awk '/^cpu /{t=0; for(i=2;i<=9;i++) t+=$i; printf "%.0f %.0f", t, $5+$6; exit}' /proc/stat; }
@@ -244,6 +258,7 @@ while :; do
     info=""
     if [ -z "$info_at" ] || [ $((up - info_at)) -ge 600 ] || [ "$up" -lt "$info_at" ]; then
       info=",\"info\":$(info_json)"; info_at=$up
+      ( post_ip 4; post_ip 6 ) &
     fi
     lat_pick
     lat=$(lat_json)

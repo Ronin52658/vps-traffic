@@ -146,7 +146,7 @@ header .sub{color:var(--muted);font-size:13px;margin-top:8px}
 .trio .r{color:var(--rx)} .trio .t{color:var(--tx)}
 /* 详情：信息格 */
 .info{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
-.info .well{padding:10px 12px;min-width:0}
+.info .well{padding:10px 12px;min-width:0;overflow-wrap:anywhere}
 .info small{display:block;color:var(--muted);font-size:12px}
 .info div div{font-size:13.5px;word-break:break-word}
 .charts{display:grid;gap:18px;grid-template-columns:1fr;margin-top:18px}
@@ -1015,7 +1015,7 @@ function monitorInfo(s) {
     ["系统", i.os], ["内核", i.kernel],
     ["CPU", i.cpu_model ? `${i.cpu_model}（${i.cores} 核）` : ""],
     ["架构 / 虚拟化", [i.arch, i.virt && i.virt !== "none" ? i.virt : (i.virt === "none" ? "物理机" : "")].filter(Boolean).join(" / ")],
-    ["IP", s.ip], ["运行时间", y ? durText(y.uptime) : ""], ["主机名", s.hostname], ["网卡", s.iface],
+    ...(s.ip4 || s.ip6 ? [["IPv4", s.ip4], ["IPv6", s.ip6]] : [["IP", s.ip]]), ["运行时间", y ? durText(y.uptime) : ""], ["主机名", s.hostname], ["网卡", s.iface],
   ];
   const nowItems = [
     ["CPU", y && y.cpu != null ? `${y.cpu.toFixed(1)}%` : ""],
