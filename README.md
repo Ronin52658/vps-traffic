@@ -1,91 +1,64 @@
 # VPS 流量监控面板
 
-Agent 读取网卡计数和系统状态（CPU、负载、内存、Swap、硬盘、连接数、进程、运行时间，以及系统版本、内核、CPU 型号、虚拟化等配置信息）并推送到面板。有人打开面板时按“实时间隔”（默认 3 秒）上报、页面同步刷新；没人看时自动放慢到“空闲间隔”（默认 60 秒）省流量；面板按自定义周期累计流量，重置时保留历史周期。面板强制 HTTPS：只能经反代（如 Nginx Proxy Manager）用 `https://域名` 访问，需要密码登录；直接访问 `http://IP:端口` 会被拒绝，Agent 也必须走 HTTPS 上报。
+一个轻量的 VPS 流量与状态监控面板：每台 VPS 上跑一个 sh 写的 Agent，把网卡流量和系统状态推送到面板；面板按你设定的周期累计流量、到量提醒，并能做延迟监测和离线通知。
 
-## 文件
+- **面板**：Python 标准库（3.9+）+ SQLite，单个网页，无需安装任何依赖
+- **Agent**：只用 `sh` + `awk` + `curl`/`wget`，不监听端口、不执行面板下发的命令，以非 root 沙箱运行
+- **安装可验证**：Agent 从 GitHub 固定提交下载，安装前双层 SHA256 校验
+- **强制 HTTPS**：面板只能经反代（如 Nginx Proxy Manager）以 `https://域名` 访问
 
-| 文件 | 用途 |
+## 功能
+
+| 功能 | 说明 |
 |---|---|
-| server.py | 面板服务端，只用 Python 标准库（3.9+），数据存 SQLite |
-| index.html | 网页界面，由 server.py 直接提供 |
-| agent.sh | 被监控 VPS 上运行的 Agent（sh + awk + curl/wget） |
-| install.sh | Agent 一键安装/卸载，从 GitHub 固定提交下载，内含 agent.sh 的 SHA256 |
-| agent_pin.json | 面板生成安装命令用的固定版本：仓库、提交、install.sh 的 SHA256 |
-| update.sh | 在 VPS 上升级已安装的 Agent（沿用原配置，见“更新 Agent”） |
-| tools/pin_agent.sh | 更新 agent.sh 哈希、切换固定提交、检查 GitHub 上的文件 |
-| install_panel.sh | 面板一键部署 |
-| flags/ | 国旗图片（Noto Color Emoji，Apache 2.0），由面板提供 |
-| icons/ | 网站图标（浏览器标签页、收藏夹、手机“添加到主屏幕”），favicon.svg 是源文件 |
-| vps-traffic-panel.service | 面板的 systemd 模板（install_panel.sh 会用到） |
-| demo/ | 演示站：mock.js 模拟后端，build_demo.py 从 index.html 生成 demo.html |
+| 流量统计 | 按日/周期累计上下行，自定义重置规则和计费方式，历史周期永久保留 |
+| 系统监控 | CPU、负载、内存/Swap、硬盘、连接数、进程、运行时间、系统配置，折线图最长 7 天 |
+| 实时刷新 | 有人看面板时按实时间隔（默认 3 秒）上报，没人看时放慢到空闲间隔（默认 60 秒）省流量 |
+| 延迟监测 | ICMP / TCP，指定由哪些服务器测哪些目标，数据保留 30 天 |
+| 分组 | 自定义分组，一台可属于多个分组，首页汇总和列表按当前分组显示 |
+| Telegram | 流量到 80% / 95% / 100% 提醒，VPS 离线 / 恢复上线通知 |
+| 区间查询 | 单台或全部服务器任意日期区间的流量 |
+| 备份还原 | 一键下载 / 还原数据库，还原时逐项校验 |
 
-## 部署面板
+## 快速开始
 
-准备一个域名解析到反代所在的机器，然后在面板机器上以 root 运行：
+### 1. 部署面板
+
+准备一个域名解析到反代所在的机器，在面板机器上以 root 运行：
 
 ```sh
 git clone https://github.com/Ronin52658/vps-traffic.git && cd vps-traffic
 sh install_panel.sh --domain traffic.example.com --port 8080
 ```
 
-再按下面“配置 HTTPS 反代”在 NPM 里加好域名，用 `https://traffic.example.com` 访问。
+结束后会打印随机生成的登录密码。想自己设密码，加 `--ask-password`（至少 8 位，不会留在 shell 历史里）。
 
-升级：`cd vps-traffic && git pull && sh install_panel.sh`（域名、端口等沿用原来的设置）。
+| 参数 | 说明 |
+|---|---|
+| `--domain` | 面板域名，首次安装必填 |
+| `--port` | 监听端口，默认 8080 |
+| `--listen` | 监听地址，默认 `0.0.0.0`（Docker 里的 NPM 需要能连到） |
+| `--proxy` | 信任的反代地址（逗号分隔的 IP 或网段），默认 `127.0.0.1,::1,172.16.0.0/12` |
+| `--cloudflare on\|off` | 域名开了 Cloudflare 代理（橙色云朵）时必须 `on` |
+| `--tz` | 时区，默认 `Asia/Shanghai`，所有重置点按这个时区的 0 点计算 |
+| `--ask-password` / `--password` | 交互输入 / 直接指定登录密码 |
+| `--uninstall` | 卸载面板（数据库保留） |
 
-结束后会打印访问地址和随机生成的登录密码。也可以用 `--ask-password` 交互输入自己的密码（至少 8 位，不会留在 shell 历史里），或 `--password 你的密码` 直接指定。
+- `--proxy`：NPM 在另一台机器上时填那台的 IP。信任列表里的地址可以伪造访客 IP，同机还跑着不受信任的 Docker 容器时，建议缩小到 NPM 所在网段（`docker network inspect` 查看）。
+- `--cloudflare on`：不开的话，面板看到的访客和 VPS 的 IP 都是 Cloudflare 节点地址，国旗和登录限流都会出错。开启后，仅当连到 NPM 的是 Cloudflare 节点时才采信 `CF-Connecting-IP`。Cloudflare 的 SSL 模式要用 Full 或 Full (strict)。
 
-其他参数：
-- `--proxy`：信任的反代地址（逗号分隔的 IP 或网段），默认 `127.0.0.1,::1,172.16.0.0/12`，覆盖本机和 Docker 里的 NPM。NPM 在另一台机器上时，填那台机器的 IP。信任列表里的地址可以绕过 HTTPS 检查、伪造访客 IP，这台机器上还跑着其他不受信任的 Docker 容器时，建议缩小到 NPM 所在的网段（`docker network inspect` 查看）。
-- `--listen`：监听地址，默认 `0.0.0.0`（Docker 里的 NPM 需要能连到）。
-- `--cloudflare on`：域名开了 Cloudflare 代理（橙色云朵）时必须加，否则面板上显示的访客和 VPS 的 IP 都是 Cloudflare 节点的地址，而且会一直变，国旗、登录限流也会跟着出错。开启后，连到 NPM 的是 Cloudflare 节点时，面板取 Cloudflare 填写的 `CF-Connecting-IP` 作为真实 IP（客户端自己带的同名头会被 Cloudflare 覆盖，X-Forwarded-For 里伪造的地址不会被采信）。升级时沿用原来的设置，`--cloudflare off` 关闭。Cloudflare 的 SSL 模式要用 Full 或 Full (strict)，用 Flexible 时 Cloudflare 到 NPM 走的是 HTTP，面板会提示“需要 HTTPS”。
+### 2. 配置 HTTPS 反代（Nginx Proxy Manager）
 
-重新运行 `install_panel.sh` 即可升级，数据库、密码、端口、时区、反代和 Telegram 设置都会保留。从旧版（root 运行、数据库在 `/opt/vps-traffic-panel`）升级时，数据库会自动搬到 `/var/lib/vps-traffic-panel`。卸载：`sh install_panel.sh --uninstall`（数据库保留）。
-
-## 登录与安全
-
-- 所有页面数据和接口都需要登录；只有 Agent 上报接口（靠 Token 认证）不需要。Agent 安装脚本不再由面板提供，改从 GitHub 下载。
-- 密码只以 PBKDF2 哈希保存。同一 IP 连续输错 5 次锁定 15 分钟。
-- 登录后在该浏览器保持 30 天，期间有访问会自动续期，关闭浏览器再打开不用重新输入密码。天数可用 `VT_SESSION_DAYS` 调整。
-- 新增服务器、首页排序、面板名称、修改密码、备份还原、退出登录都在首页右上角的“设置”里。
-- 复制命令：浏览器不允许自动复制时会帮你选中命令，手动复制即可。
-- 在面板“设置”里修改密码，改完后其他设备的登录会失效。
-- 退出登录会让这个会话立即失效，Cookie 即使被复制走也不能再用。
-- 忘记密码：在仓库目录里运行 `sh install_panel.sh --ask-password`（至少 8 位）。
-- 防跨站请求伪造：所有改动类请求必须由面板自己的网页发出（带专用请求头且 Origin 与地址一致），同一 IP 上其他端口的网页也无法冒用你的登录。
-- 单个连接 20 秒没有完成请求就断开，同时最多处理 200 个连接，慢速连接拖不垮面板。
-- 页面禁止被其他网站嵌入（防点击劫持），并设置了内容安全策略：只允许加载面板自己的脚本、样式和图片，也只能向面板自己发请求。
-- 在“设置”里改密码时，原密码输错和登录共用限流。
-- 登录限流两层：同一 IP 连续输错 5 次锁 15 分钟；所有 IP 合计 10 分钟内失败 30 次，暂停陌生 IP 登录 15 分钟。最近 30 天成功登录过的 IP 不受全局暂停影响，攻击者没法借此把你锁在门外。
-- 强制 HTTPS：面板只接受“来自信任反代地址、且 `X-Forwarded-Proto: https`”的请求，不在信任列表里的来源（比如公网直接连端口）在建立连接后立即断开，连页面都拿不到，也占不住连接名额；反代没用 HTTPS 时网页显示“需要 HTTPS”、接口返回 403；Host 也必须是设置的域名。登录 Cookie 只经 HTTPS 发送，并下发 HSTS，浏览器之后自动只用 HTTPS。
-- 紧急情况（例如证书过期进不去）可以在服务文件里把 `VT_REQUIRE_HTTPS=1` 改成 `0` 临时关闭，处理完记得改回来。
-
-## 面板的权限
-
-面板以专用系统用户 `vps-traffic`（无 shell、无家目录）运行，不是 root，并放在只读沙箱里：
-
-- 程序文件在 `/opt/vps-traffic-panel`，属于 root，面板只能读
-- 唯一可写的是数据目录 `/var/lib/vps-traffic-panel`（数据库、备份临时文件、还原前的安全副本）
-- 不能提权，只保留绑定 1024 以下端口的能力；看不到其他进程；系统调用限制在普通服务范围内
-- 可以用 `systemd-analyze security vps-traffic-panel` 查看沙箱评分
-
-## 配置 HTTPS 反代（Nginx Proxy Manager）
-
-1. NPM 里新增 Proxy Host：Domain 填部署时的 `--domain`，Forward 填 `http` + 面板机器的 IP + 端口 8080（NPM 和面板在同一台时，填 Docker 网桥网关地址，如 `172.17.0.1`，用 `docker network inspect` 查看；或这台机器的公网 IP）。
+1. 新增 Proxy Host：Domain 填 `--domain` 的域名；Forward 填 `http` + 面板机器 IP + 8080。NPM 和面板在同一台时，填 Docker 网桥网关（如 `172.17.0.1`）或本机公网 IP。
 2. SSL 页签申请 Let's Encrypt 证书，开启 Force SSL（建议也开 HTTP/2、HSTS）。
-3. 用 `https://域名` 登录。打开时 NPM 报 502，或看到“需要 HTTPS”，说明请求不是从信任的反代、或不是经 HTTPS 来的：检查 NPM 的来源地址是否在 `--proxy` 列表里（`journalctl -u vps-traffic-panel` 可看到当前的信任列表）。
-4. 建议在防火墙/安全组里关闭 8080 对公网的访问，只让反代连。面板本身也会拒绝非反代的请求，这一步是多一层保护。
+3. 用 `https://域名` 登录。
+4. 建议在防火墙 / 安全组里关掉 8080 的公网访问，只让反代连。
 
-面板的登录 Cookie 现在属于域名，不再和同一 IP 上其他端口的面板共用。
+报 502 或页面显示“需要 HTTPS”：说明请求不是从信任的反代、或不是经 HTTPS 来的。检查 NPM 的来源地址是否在 `--proxy` 列表里，`journalctl -u vps-traffic-panel` 可以看到当前的信任列表。
 
-### 从旧版（IP:端口 直接访问）升级
+### 3. 加入 VPS
 
-1. 先在 NPM 里配好域名和证书，再运行 `sh install_panel.sh --domain 你的域名`。
-2. 升级后旧 Agent（配置的是 `http://IP:端口`）上报会被拒绝。Agent 会把这段时间的流量攒着，不会丢。
-3. 用 `https://域名` 登录面板，到每台服务器的“设置”里复制新的安装命令，在 VPS 上重新运行（Token 不变）；Agent 改走 HTTPS 后会把攒下的流量一次补上。
-
-## 加入 VPS
-
-面板点“新增服务器”，复制生成的命令在 VPS 上以 root 运行（三行一起粘贴）：
+面板首页“设置”→“新增服务器”，复制生成的三行命令，在 VPS 上以 root 运行：
 
 ```sh
 if command -v curl >/dev/null; then curl -fsSL --proto '=https' -o /root/vps-traffic-install.sh <地址>; else wget -q --https-only -O /root/vps-traffic-install.sh <地址>; fi
@@ -93,154 +66,192 @@ echo "<install.sh 的 SHA256>  /root/vps-traffic-install.sh" | sha256sum -c - &&
 rm -f /root/vps-traffic-install.sh
 ```
 
-- 脚本固定在 `agent_pin.json` 指定的提交，不跟随分支变化；仓库之后再改，已生成的命令装出来的仍是同一份代码。
-- 两层校验：命令先校验 install.sh 的 SHA256（来自面板的 `agent_pin.json`），install.sh 再校验 agent.sh 的 SHA256（写在 install.sh 里），任何一层不一致都中止，不会改动 VPS。
-- 第一行有 curl 用 curl，只有 wget 的精简系统自动改用 wget；`<地址>` 是 `https://raw.githubusercontent.com/Ronin52658/vps-traffic/<提交>/install.sh`。没有 curl 时 TCP 延迟测试不可用（ICMP 不受影响）。
-- 可选参数加在第二行末尾：`--iface eth0` 指定网卡（默认自动检测默认路由），`--interval 3` 初始上报间隔（秒）。
+- 命令固定在 `agent_pin.json` 指定的提交，仓库之后再改，同一条命令装出来的仍是同一份代码。
+- 双层校验：命令先校验 install.sh，install.sh 再校验 agent.sh（哈希写在 install.sh 里），任一不一致都中止，不改动 VPS。
+- 可选参数加在第二行末尾：`--iface eth0` 指定网卡（默认按默认路由自动检测）。
+- 卸载：`sh /root/vps-traffic-install.sh --uninstall`（第二行末尾的参数换成 `--uninstall`）。
 
-### 更新 Agent
+**VPS 连不上 GitHub**：服务器“设置”里安装命令下方展开“VPS 连不上 GitHub？”，面板会生成两种装法：
 
-- Agent 每次上报会带上自己的版本号（agent.sh 内容的 SHA256 前 12 位）。和面板固定的版本不一致时，首页卡片上显示“Agent 需更新”，详情页“监控”里有“Agent 版本”一栏。
-- 在要升级的 VPS 上以 root 运行（可以用终端工具的“发送到所有会话”批量执行）：
+- **手动上传**：在能访问 GitHub 的机器上下载固定提交的 `install.sh` 和 `agent.sh`，传到 VPS 的 `/root/`，运行 `sh install.sh --agent-file agent.sh --server ... --token ...`。
+- **经镜像下载**：下载地址前加镜像前缀，并给 install.sh 加 `--mirror https://ghfast.top/`。镜像失效时换别的前缀即可。
 
-  ```sh
-  wget -qO- https://raw.githubusercontent.com/Ronin52658/vps-traffic/main/update.sh | sh
-  ```
+两种方式都照样校验 SHA256，镜像或传输途中被改过的文件装不上。
 
-  或者先下载再执行：`wget -q https://raw.githubusercontent.com/Ronin52658/vps-traffic/main/update.sh && bash update.sh`
-- `update.sh` 读取仓库 main 分支的 `agent_pin.json`，下载其中固定提交的 install.sh 并校验 SHA256，再以 `--upgrade` 运行：沿用这台原来的面板地址、Token、网卡和间隔，流量数据不受影响。已经是最新版本时什么都不做；`FORCE=1` 强制重装；没装过 Agent 的机器会提示改用面板里的安装命令。
-- 连不上 GitHub 时经镜像：`wget -qO- https://ghfast.top/https://raw.githubusercontent.com/Ronin52658/vps-traffic/main/update.sh | MIRROR=https://ghfast.top/ sh`（镜像改不了内容，下载的文件照样校验）。
-- 面板不提供一键更新，也没法让 Agent 自动更新：升级始终由你在 VPS 上以 root 执行。
-- 建议先升级一台、观察几分钟，再批量升级其余机器。
+### 4. 更新 Agent
 
-### VPS 连不上 GitHub
+Agent 版本和面板固定的版本不一致时，首页卡片显示“Agent 需更新”。在要升级的 VPS 上以 root 运行（可以用终端工具的“发送到所有会话”批量执行）：
 
-服务器“设置”里的安装命令下方有“VPS 连不上 GitHub？”，展开后有两种装法，面板会按这台服务器的 Token 生成好命令：
+```sh
+wget -qO- https://raw.githubusercontent.com/Ronin52658/vps-traffic/main/update.sh | sh
+```
 
-- **手动上传**：在能访问 GitHub 的机器（比如面板机器）上下载固定提交的 `install.sh` 和 `agent.sh`，传到 VPS 的 `/root/`，再运行
-  `sh install.sh --agent-file agent.sh --server ... --token ...`。全程不需要 VPS 访问 GitHub。
-- **经镜像下载**：在原命令的下载地址前加镜像前缀，并给 install.sh 加 `--mirror https://ghfast.top/`，agent.sh 也会经同一个镜像下载。镜像是第三方服务，可能失效，换成别的前缀即可（格式为 `https://镜像地址/` 后面直接接 GitHub 原地址）。
+- 读取 main 分支的 `agent_pin.json`，下载固定提交的 install.sh 并校验后以 `--upgrade` 运行；面板地址、Token、网卡、间隔沿用原配置，流量数据不受影响。
+- 已是最新时什么都不做；`FORCE=1` 强制重装（`... | FORCE=1 sh`）。
+- 连不上 GitHub：`wget -qO- https://ghfast.top/https://raw.githubusercontent.com/Ronin52658/vps-traffic/main/update.sh | MIRROR=https://ghfast.top/ sh`
+- 面板没有一键更新，Agent 也不会自动更新，升级始终由你在 VPS 上执行。建议先升一台观察几分钟再批量。
 
-两种方式都照样校验 SHA256：install.sh 的哈希由面板给出，agent.sh 的哈希写在 install.sh 里，文件被改过就会中止安装，所以经第三方镜像或手动传文件都不会装上被篡改的版本。
+### 5. 升级面板
 
-### 发布新版 Agent
+```sh
+cd vps-traffic && git pull && sh install_panel.sh
+```
 
-1. 修改 `agent.sh` 或 `install.sh`；改过 agent.sh 的话运行 `sh tools/pin_agent.sh hash`，把新哈希写进 install.sh
-2. 提交并推送到 GitHub
-3. `sh tools/pin_agent.sh pin <刚才的提交>` 更新 `agent_pin.json`，再提交推送
-4. `sh tools/pin_agent.sh check` 确认 GitHub 上的文件可下载且哈希一致
-5. 面板机器上拉取新代码，重新运行 `sh install_panel.sh`；之后生成的安装命令就会用新提交
+数据库、密码、域名、端口、时区、反代、Cloudflare 和 Telegram 设置都会保留。
 
-合并 PR 时请用 “Create a merge commit”，保留原提交哈希（squash / rebase 会产生新哈希，旧的固定提交虽然仍可通过 PR 访问，但最好重新 pin 到 main 上的提交）。
-也可以不改文件，用 `VT_AGENT_REPO`、`VT_AGENT_COMMIT`、`VT_AGENT_INSTALL_SHA256` 环境变量覆盖（写在面板的 systemd 服务里）。
+## 使用说明
+
+### 重置规则与计费
+
+- **每月固定日**：例如 31 号，小月自动改在当月最后一天
+- **每隔 N 天**：从起算日期开始每 N 天一轮
+- **仅手动重置**：周期不会自动结束
+
+修改规则时当前周期起点不变，按新规则重算结束时间。计费方式可选双向相加、仅上行、仅下行、取较大方向，额度百分比、提醒和用量条都按计费方式计算。
 
 ### 刷新间隔
 
-在“设置”→“刷新间隔”里设置两个值，Agent 每次上报后会按面板的回应自动调整，不需要登录 VPS 修改：
+“设置”→“刷新间隔”。Agent 每次上报后按面板的回应自动调整，不用登录 VPS 修改：
 
-- 实时间隔（默认 3 秒）：最近 90 秒内有人在用面板时使用，页面也按这个间隔刷新
-- 空闲间隔（默认 60 秒）：没人看时使用。打开面板后，最多要等一个空闲间隔，网速才切到实时
+- **实时间隔**（默认 3 秒）：最近 90 秒内有人在看面板时使用
+- **空闲间隔**（默认 60 秒）：没人看时使用；打开面板后最多等一个空闲间隔切到实时
 
-每次上报（含系统信息）连同 TCP 握手约 1.3 KB。一直按 3 秒上报每台每月约 1.1 GB；按 60 秒约 55 MB。所以空闲时放慢很重要。
+每次上报约 1.3 KB：一直按 3 秒上报每台每月约 1.1 GB，按 60 秒约 55 MB。
 
-旧版 Agent 不认识面板下发的间隔，需要在每台 VPS 上重新运行一次面板里的安装命令（Token 不变，数据不受影响）。
-卸载：把安装命令第二行末尾的参数换成 `--uninstall`（即 `sh /root/vps-traffic-install.sh --uninstall`），其余不变。
+### 系统监控
 
-## Agent 的权限
+- 首页卡片：在线时长、系统、CPU、内存、硬盘、流量周期用量、实时网速。顶部汇总在线数、总网速、今日流量、内存和硬盘用量。
+- 详情页“监控”：系统信息、Agent 版本，以及 CPU、负载、内存与 Swap、硬盘、网速、连接数、进程七张图，可选实时 / 1 小时 / 6 小时 / 24 小时 / 7 天。数据按分钟保存 7 天。
+- IP 是面板看到的上报来源地址（NAT 机显示出口 IP）。双栈机器分别显示 IPv4 和 IPv6，超过一天没见到的地址不再显示。
+- 国旗：第一次见到某个 IP 时向 ipinfo.io（备用 ip-api.com）查一次国家并存库，只发送这个 IP；也可以在服务器设置里手动填两位国家代码。
 
-Agent 由 systemd 以临时普通用户（`DynamicUser`）运行，不是 root，并放在只读沙箱里：
+### 分组
 
-- 整个系统只读，`/home` 不可见，只有自己的状态目录 `/var/lib/private/vps-traffic` 可写
-- 不能提权、运行时没有任何 capability、不能加载内核模块、不能改系统时间和主机名。能力边界集里只留了 `CAP_NET_RAW`：系统自带的 ping 带这个文件能力，边界集里没有它时 ping 根本无法执行；因为 `NoNewPrivileges=yes`，ping 运行时也拿不到它，只能用内核给普通用户的 ICMP
-- 只能使用 IPv4/IPv6、本地 socket 和读路由表，系统调用限制在普通服务的范围内
-- 配置文件 `/etc/vps-traffic/agent.conf`（含 Token）只有 root 能读，由 systemd 读取后以环境变量交给 Agent
-- 上报时 Token 经标准输入交给 curl，不出现在命令行参数里，本机其他用户用 `ps` 看不到
+“设置”→“分组”→“管理分组”，或在单台服务器的“设置”分页里勾选所属分组。
 
-可以用 `systemd-analyze security vps-traffic-agent` 查看沙箱评分。
+- 一台服务器可以属于多个分组，删除分组不会删除服务器。
+- 首页顶部出现分组栏（“全部”+ 自定义分组），切换后顶部汇总、服务器列表和“区间统计”都只算当前分组，浏览器会记住上次的选择。
 
-已知影响：如果系统给 `/proc` 开启了 `hidepid`，进程数只会统计到 Agent 自己；少数容器里“虚拟化”一栏可能为空。其余功能不受影响。
+### 延迟监测
 
-从旧版（root 运行）升级：在 VPS 上重新运行一次面板里的安装命令即可，安装脚本会清理旧的状态目录（只损失几秒的计数）。
+“设置”→“延迟监测”→“管理测试目标”：
 
-## 重置规则
+- **任务视图**：添加目标（ICMP 或 TCP、IP / 域名、端口、间隔 30–300 秒），勾选由哪些服务器测。
+- **服务器视图**：按服务器勾选要测哪些目标。
+- 详情页“延迟”分页：1 小时到 30 天或自定义区间；每个目标显示当前延迟、丢包率、抖动，可开关曲线，“平滑峰值”压掉偶发尖刺。
+- 测法：ICMP 每次 5 个包；TCP 每次连 3 次只量建连时间，超过 2 秒算丢失。抖动为相邻两次延迟差的平均值。
+- 数据每分钟一个点，保留 30 天。每个“目标 × 服务器”组合 30 天约 2.6 MB。修改目标地址、方式或端口会清空该目标的历史。
+- 显示“无法探测”：VPS 不允许普通用户 ping 时，在 VPS 上运行 `sysctl -w net.ipv4.ping_group_range="0 2147483647"`，或改用 TCP。
 
-- 每月固定日：例如 31 号，小月自动改在当月最后一天
-- 每隔 N 天：从起算日期开始每 N 天一轮
-- 仅手动重置：周期不会自动结束
+### 区间查询
 
-所有重置点以 `VT_TZ` 时区（默认 Asia/Shanghai）的 0 点计算。修改规则时，当前周期起点不变，按新规则重算结束时间。
+- 单台：详情页“区间查询”，显示下行、上行、合计、计费用量和每日柱状图，有本周期、上个周期、近 7 / 30 天、本月、上月等快捷按钮。
+- 全部：首页“区间统计”，点某一行跳到该服务器的明细。
+- 按整天统计，含首尾两天，最长 400 天。
 
-## 计费方式
+### Telegram 通知
 
-双向相加、仅上行、仅下行、取较大方向。额度百分比、告警与用量条都按计费方式计算。
+在 `/etc/vps-traffic-panel.env`（权限 600）里填上：
 
-## 服务器配置与系统监控
+```sh
+VT_TG_TOKEN=机器人Token
+VT_TG_CHAT=聊天ID
+```
 
-- 首页卡片：在线时长、系统版本、核心数、CPU（含负载）、内存、硬盘、流量周期用量，以及实时网速和本周期累计。顶部汇总在线数、实时总网速、今日流量、内存和硬盘总用量。
-- 详情页“监控”分页：系统信息（系统、内核、CPU 型号、架构/虚拟化、IP、运行时间、主机名、网卡）、当前状态，以及 CPU、负载、内存与 Swap、硬盘、网络速率、网络连接、进程七张折线图；可选实时、1 小时、6 小时、24 小时、7 天。
-- IP 取的是面板看到的上报来源地址；NAT 机显示的是它的出口 IP。双栈机器分别显示 IPv4 和 IPv6：Agent 每 10 分钟各用 IPv4、IPv6 发一个只记地址的小请求（需要新版 Agent）；超过一天没再见到的地址不再显示。国旗优先按 IPv4 识别。
-- 国旗：面板第一次看到某台机器的 IP 时，会向 ipinfo.io（失败时改用 ip-api.com）查一次国家，结果存库，之后不再重复查询。查询由面板服务器发出，只发送该 IP。也可以在服务器设置里手动填两位国家代码覆盖自动结果。国旗是图片（`flags/` 目录，取自 Noto Color Emoji），Windows 上也能正常显示。
-- 不显示价格和到期时间。
-- 监控数据按分钟保存 7 天；“实时”用面板内存里最近约 240 次上报。
-- Agent 只读取 /proc、df 等本机信息，不监听端口，也不执行任何来自面板的命令（延迟监测只接收“测哪个 IP/域名、哪个端口、多久一次”，见下节）。
-- 旧版 Agent 不会上报系统信息，需要在 VPS 上重新运行一次面板里的安装命令（Token 不变）。
+然后 `systemctl restart vps-traffic-panel`。不要写进服务文件，服务文件所有用户都能读。
 
-## 分组
+- **流量提醒**：用量到 80%、95%、100% 各提醒一次；周期中途调高额度后按新额度重新计算。
+- **离线 / 上线通知**：“设置”→“离线通知”。超过设定时间（默认 3 分钟，1–60 分钟可调）没上报算离线，恢复时附带离线时长；多台同时变化合并成一条。
+  - 判定时间至少是“空闲间隔 × 2 + 30 秒”，Agent 放慢上报时不会误判。
+  - 面板刚重启的几分钟内不判定离线。
+  - 单台服务器可以在它的“设置”分页里关掉通知。
+  - “发送测试消息”可检查配置，失败时显示 Telegram 返回的原因。
 
-首页“设置”→“分组”→“管理分组”：新建分组、改名、排序、删除，勾选分组里有哪些服务器。也可以在单台服务器的“设置”分页里勾选它所属的分组。
+### 备份与还原
 
-- 一台服务器可以同时属于多个分组（例如既在“香港”又在“落地机”）；删除分组不会删除服务器。
-- 有分组后，首页顶部出现分组栏：“全部”加各个自定义分组，后面是台数。切换后，顶部汇总（在线、实时下行/上行、今日流量、内存、硬盘）和下方服务器列表都只算当前分组；浏览器会记住上次选的分组。
-- “区间统计”也只统计当前分组；要看全部服务器，先在首页切到“全部”。
+“设置”里：
 
-## 延迟监测
+- **下载备份**：一个 `.db` 文件，包含服务器设置、Agent Token、周期历史和小时明细；不含登录密码和会话密钥，但含 Token，请妥善保管。
+- **从备份还原**：先校验格式、完整性和表结构，再完全替换当前数据。还原前自动保存 `traffic.db.before-restore-时间`（保留最近 5 份）；当前密码和会话不变；每个字段都重新校验，被改过的备份既改不了密码，也塞不进脚本。
 
-首页“设置”→“延迟监测”→“管理测试目标”：
+**迁移面板**：旧面板下载备份 → 新面板还原 → 各台 VPS 把 `/etc/vps-traffic/agent.conf` 里的 `SERVER` 改成新地址，再 `systemctl restart vps-traffic-agent`。
 
-- **任务视图**：添加测试目标（名称、ICMP 或 TCP、IP/域名、TCP 端口、间隔 30/60/120/300 秒），勾选由哪些服务器来测；可调整顺序、编辑、删除。
-- **服务器视图**：按服务器勾选它要测哪些目标。
-- 服务器详情的“延迟”分页：时间范围 1 小时、6 小时、12 小时、1 天、7 天、30 天或自定义；每个目标一张卡片（当前延迟 · 丢包率 · 抖动），点卡片显示/隐藏曲线，“全选/全不选”，“平滑峰值”用相邻 5 个点的中位数压掉偶发尖刺；下方是延迟和丢包率两张图。
-- 测法：ICMP 每次发 5 个包（间隔 1 秒，超时 2 秒）；TCP 每次连 3 次，只量建立连接的时间，超过 2 秒算丢失。抖动是相邻两次延迟之差的平均值。
-- 数据每分钟一个点，保留 30 天（每小时清理一次过期数据）。数据库大小粗估：每个“目标 × 服务器”组合 30 天约 2.6 MB，例如 10 个目标 × 20 台约 520 MB。修改目标地址、方式或端口后，该目标的历史数据会清空。
-- ICMP 需要 VPS 允许普通用户发 ping（`net.ipv4.ping_group_range`，Debian 11+/Ubuntu 20.04+ 默认允许）。卡片显示“无法探测”时改用 TCP，或在 VPS 上运行 `sysctl -w net.ipv4.ping_group_range="0 2147483647"`。
-- 需要新版 Agent：已装的 VPS 在面板里重新运行一次安装命令即可（Token 不变）。
-- 安全：面板只下发目标的类型、IP/域名、端口和间隔，面板和 Agent 两边都会校验，目标只能是 IP 或普通域名，不能以 `-` 开头，无法注入命令或参数。
+### 数据保留
 
-## 区间查询
+| 数据 | 保留 |
+|---|---|
+| 周期记录 | 永久 |
+| 每小时流量明细 | 400 天 |
+| 系统监控（每分钟） | 7 天 |
+| 延迟监测（每分钟） | 30 天 |
 
-- 单台服务器：详情页“区间查询”，选开始和结束日期（例如 10-23 至 12-26），显示下行、上行、合计、计费用量和每日柱状图。快捷按钮有本周期、上个周期、近 7 天、近 30 天、本月、上月。
-- 全部服务器：首页“区间统计”，列出每台在这段时间的流量和合计，点某一行可跳到该服务器的区间明细。
-- 按整天统计，含首尾两天，最长 400 天（与小时明细保留天数一致）。
+## 安全
 
-## 备份与还原
+### 登录
 
-在“设置”里：
+- 除 Agent 上报接口（Token 认证）外，所有页面和接口都要登录。
+- 密码以 PBKDF2 哈希保存。登录保持 30 天、有访问自动续期（`VT_SESSION_DAYS` 可调）；改密码后其他设备失效，退出登录立即作废该会话。
+- 登录限流：同一 IP 连续输错 5 次锁 15 分钟；全部 IP 10 分钟内失败 30 次时暂停陌生 IP 登录 15 分钟，最近 30 天成功登录过的 IP 不受影响。
+- 忘记密码：在仓库目录运行 `sh install_panel.sh --ask-password`。
 
-- 下载备份：一个 `.db` 文件，包含所有服务器设置、Agent Token、周期历史与小时明细。不含登录密码哈希和会话密钥（拿到备份的人不能登录面板），但内含 Agent Token，请妥善保管。
-- 从备份还原：先验证文件（格式、完整性、表结构），再完全替换当前数据。还原前自动保存 `traffic.db.before-restore-时间`（保留最近 5 份）；当前登录密码、会话密钥和登录白名单不变；备份里的触发器和视图一律删除，每个字段都会重新校验（异常值改成默认值、格式不对或重复的 Token 换新），被人改过的备份文件既不能篡改密码，也不能往页面里塞脚本。
+### 面板防护
 
-迁移面板：旧面板下载备份 → 新面板还原 → 各台 VPS 把 `/etc/vps-traffic/agent.conf` 的 `SERVER` 改成新地址后 `systemctl restart vps-traffic-agent`。
+- **强制 HTTPS**：只接受来自信任反代、且 `X-Forwarded-Proto: https`、Host 为设置域名的请求；其他来源建立连接后立即断开。Cookie 只经 HTTPS 发送，并下发 HSTS。
+- **防跨站请求伪造**：改动类请求必须带专用请求头且 Origin 与地址一致；Cookie 为 SameSite=Strict。
+- **内容安全策略**：只加载面板自己的脚本、样式和图片，禁止被其他网站嵌入。
+- **抗慢速攻击**：单个连接 20 秒未完成请求即断开，最多同时处理 200 个连接。
+- 证书过期等紧急情况进不去时，可在服务文件里把 `VT_REQUIRE_HTTPS=1` 临时改成 `0`，处理完记得改回。
 
-## Telegram 告警（可选）
+### 面板的权限
 
-在 `/etc/vps-traffic-panel.env`（权限 600，只有 root 能读）里填上 `VT_TG_TOKEN` 和 `VT_TG_CHAT`，然后 `systemctl restart vps-traffic-panel`。不要写在服务文件里：服务文件所有用户都能读。旧版写在服务文件里的设置，升级时会自动搬过去。
+面板以专用系统用户 `vps-traffic`（无 shell、无家目录）运行，不是 root：
 
-用量到 80%、95%、100% 时各提醒一次；周期中途调高额度后，按新额度重新计算提醒。
+- 程序文件 `/opt/vps-traffic-panel` 属于 root，面板只读
+- 唯一可写的是数据目录 `/var/lib/vps-traffic-panel`
+- 不能提权，看不到其他进程，系统调用限制在普通服务范围内
 
-**离线 / 上线通知**：首页“设置”→“离线通知”。VPS 超过设定时间（默认 3 分钟，可设 1–60 分钟）没上报就算离线，离线和恢复上线各发一条消息，恢复时附带离线时长；多台同时离线或同时恢复都合并成一条（恢复消息最多晚 15 秒）。
+### Agent 的权限
 
-- 实际判定时间至少是“空闲上报间隔 × 2 + 30 秒”，没人看面板、Agent 放慢上报时不会被误判离线。
-- 面板刚重启的几分钟内不判定离线（面板停机期间所有机器都没法上报，重启后不该误报）。
-- 单台服务器可以在它的“设置”分页里关掉通知，例如经常重启的测试机。
-- “发送测试消息”可以检查 Telegram 是否配置正确，失败时会显示 Telegram 返回的原因。
+Agent 由 systemd 以临时普通用户（`DynamicUser`）运行，不是 root：
 
-## 数据保留
+- 整个系统只读、`/home` 不可见，只有自己的状态目录可写
+- 不能提权、运行时没有任何 capability。能力边界集只留 `CAP_NET_RAW`，仅为让系统自带的 ping 能启动；因为 `NoNewPrivileges`，ping 实际只能用内核给普通用户的 ICMP
+- 只能使用 IPv4 / IPv6、本地 socket 和读路由表
+- 配置文件 `/etc/vps-traffic/agent.conf`（含 Token）只有 root 能读；上报时 Token 经标准输入交给 curl，`ps` 看不到
+- 只读 /proc、df 等本机信息；延迟监测只接收“测哪个 IP / 域名、哪个端口、多久一次”，面板和 Agent 两边都校验，无法注入命令或参数
 
-- 周期记录：永久保留
-- 每小时明细：保留 400 天
+两者都可以用 `systemd-analyze security vps-traffic-panel` / `vps-traffic-agent` 查看沙箱评分。
+
+## 文件
+
+| 文件 | 用途 |
+|---|---|
+| `server.py` | 面板服务端 |
+| `index.html` | 网页界面，由 server.py 直接提供 |
+| `install_panel.sh` | 面板一键部署 / 升级 / 卸载 |
+| `vps-traffic-panel.service` | 面板的 systemd 模板 |
+| `agent.sh` | VPS 上运行的 Agent |
+| `install.sh` | Agent 安装 / 升级 / 卸载，内含 agent.sh 的 SHA256 |
+| `update.sh` | 在 VPS 上升级已装的 Agent |
+| `agent_pin.json` | 固定的 Agent 版本：提交、install.sh 与 agent.sh 的 SHA256 |
+| `tools/pin_agent.sh` | 更新哈希、切换固定提交、检查 GitHub 上的文件 |
+| `flags/` | 国旗图片（Noto Color Emoji，Apache 2.0） |
+| `icons/` | 网站图标 |
+| `demo/` | 演示站：`mock.js` 模拟后端，`build_demo.py` 生成 `demo.html` |
+
+## 发布新版 Agent
+
+1. 修改 `agent.sh` 或 `install.sh`；改了 agent.sh 就运行 `sh tools/pin_agent.sh hash`，把新哈希写进 install.sh
+2. 提交并推送
+3. `sh tools/pin_agent.sh pin <刚才的提交>` 更新 `agent_pin.json`，再提交推送
+4. `sh tools/pin_agent.sh check` 确认 GitHub 上的文件可下载且哈希一致
+5. 面板机器上升级面板，之后生成的安装命令就用新提交；已装的 VPS 运行 update.sh 升级
+
+合并 PR 请用 “Create a merge commit” 保留原提交哈希。也可以用环境变量 `VT_AGENT_REPO`、`VT_AGENT_COMMIT`、`VT_AGENT_INSTALL_SHA256` 覆盖固定版本。
 
 ## 已知限制
 
-- 上报失败时 Agent 会累积增量并在下次补送；如果补送时已跨过重置点，这部分会计入新周期
-- 只统计一张网卡；Docker/TUN 等虚拟网卡不计入
+- 只统计一张网卡，Docker / TUN 等虚拟网卡不计入
+- 上报失败时 Agent 会攒着增量下次补送；补送时已跨过重置点的话，这部分计入新周期
 - 面板收到上报但响应丢失时，该次增量可能重复计算一次
+- `/proc` 开了 `hidepid` 时进程数只统计到 Agent 自己；少数容器里“虚拟化”一栏可能为空
