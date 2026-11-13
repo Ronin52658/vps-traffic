@@ -11,6 +11,7 @@ Agent 读取网卡计数和系统状态（CPU、负载、内存、Swap、硬盘�
 | agent.sh | 被监控 VPS 上运行的 Agent（sh + awk + curl/wget） |
 | install.sh | Agent 一键安装/卸载，从 GitHub 固定提交下载，内含 agent.sh 的 SHA256 |
 | agent_pin.json | 面板生成安装命令用的固定版本：仓库、提交、install.sh 的 SHA256 |
+| update.sh | 在 VPS 上升级已安装的 Agent（沿用原配置，见“更新 Agent”） |
 | tools/pin_agent.sh | 更新 agent.sh 哈希、切换固定提交、检查 GitHub 上的文件 |
 | install_panel.sh | 面板一键部署 |
 | flags/ | 国旗图片（Noto Color Emoji，Apache 2.0），由面板提供 |
@@ -97,12 +98,20 @@ rm -f /root/vps-traffic-install.sh
 - 第一行有 curl 用 curl，只有 wget 的精简系统自动改用 wget；`<地址>` 是 `https://raw.githubusercontent.com/Ronin52658/vps-traffic/<提交>/install.sh`。没有 curl 时 TCP 延迟测试不可用（ICMP 不受影响）。
 - 可选参数加在第二行末尾：`--iface eth0` 指定网卡（默认自动检测默认路由），`--interval 3` 初始上报间隔（秒）。
 
-### 批量更新 Agent
+### 更新 Agent
 
 - Agent 每次上报会带上自己的版本号（agent.sh 内容的 SHA256 前 12 位）。和面板固定的版本不一致时，首页卡片上显示“Agent 需更新”，详情页“监控”里有“Agent 版本”一栏。
-- 首页“设置”→“批量更新 Agent”给出一条所有 VPS 通用的升级命令：`sh install.sh --ref <提交> --upgrade` 会沿用每台原来的面板地址、Token、网卡和间隔，流量数据不受影响；没装过 Agent 的机器会提示改用安装命令。
-- 一次升级多台：用 Xshell、Termius、FinalShell 等的“发送到所有会话”粘贴这条命令；或者复制下方的 SSH 批量升级脚本（已预填需要更新的服务器，地址和端口按实际修改），在能 SSH 到这些 VPS 的电脑上运行。
-- 面板不会、也没法让 Agent 自动更新：升级始终需要你在 VPS 上以 root 运行命令，面板被攻破也无法借此在 VPS 上执行代码。
+- 在要升级的 VPS 上以 root 运行（可以用终端工具的“发送到所有会话”批量执行）：
+
+  ```sh
+  wget -qO- https://raw.githubusercontent.com/Ronin52658/vps-traffic/main/update.sh | sh
+  ```
+
+  或者先下载再执行：`wget -q https://raw.githubusercontent.com/Ronin52658/vps-traffic/main/update.sh && bash update.sh`
+- `update.sh` 读取仓库 main 分支的 `agent_pin.json`，下载其中固定提交的 install.sh 并校验 SHA256，再以 `--upgrade` 运行：沿用这台原来的面板地址、Token、网卡和间隔，流量数据不受影响。已经是最新版本时什么都不做；`FORCE=1` 强制重装；没装过 Agent 的机器会提示改用面板里的安装命令。
+- 连不上 GitHub 时经镜像：`wget -qO- https://ghfast.top/https://raw.githubusercontent.com/Ronin52658/vps-traffic/main/update.sh | MIRROR=https://ghfast.top/ sh`（镜像改不了内容，下载的文件照样校验）。
+- 面板不提供一键更新，也没法让 Agent 自动更新：升级始终由你在 VPS 上以 root 执行。
+- 建议先升级一台、观察几分钟，再批量升级其余机器。
 
 ### VPS 连不上 GitHub
 
