@@ -142,6 +142,8 @@ probe_tcp() {
   out="" k=0
   while [ $k -lt 3 ]; do
     t=$($TMO curl -s -o /dev/null --connect-timeout 2 -m 2 -w '%{time_connect}' "telnet://$h:$2" </dev/null 2>/dev/null)
+    # curl 自身用不了（不支持该协议、初始化失败、功能没编进去）算探测出错，不算丢包
+    case $? in 1|2|4) echo "0 -1 0 0 0"; return ;; esac
     out="$out ${t:-0}"; k=$((k + 1))
   done
   printf '%s\n' "$out" | awk '{ for (i = 1; i <= NF; i++) { s++; v = $i * 1000; if (v > 0) { r++; sum += v; if (v > mx) mx = v;

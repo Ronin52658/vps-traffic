@@ -10,7 +10,7 @@ set -e
 
 # agent.sh 的 SHA256：agent.sh 每次修改后用 sh tools/pin_agent.sh hash 更新
 REPO="Ronin52658/vps-traffic"
-AGENT_SHA256="87bef80b26bb5cfd44cce1896299701d5cd20345e44a5b86a27692db6d766adf"
+AGENT_SHA256="679680c4733df0215bc825cb98cd7fcfa367cb7759fa22852c6efa9817588618"
 
 SERVER="" TOKEN="" IFACE="auto" INTERVAL=3 UNINSTALL=0 REF="" AGENT_FILE="" MIRROR=""
 while [ $# -gt 0 ]; do
@@ -143,6 +143,9 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
+# ping 启动时会调用 capset / setuid 主动放弃权限，这几个调用在 @privileged 里，被禁后 ping 直接报错退出
+# （cap_set_proc: Operation not permitted）。放行它们是安全的：进程没有任何能力，只能放弃、不能获得权限
+SystemCallFilter=capset setuid setresuid setreuid setgroups
 SystemCallErrorNumber=EPERM
 
 [Install]
