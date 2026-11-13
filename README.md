@@ -97,6 +97,13 @@ rm -f /root/vps-traffic-install.sh
 - 第一行有 curl 用 curl，只有 wget 的精简系统自动改用 wget；`<地址>` 是 `https://raw.githubusercontent.com/Ronin52658/vps-traffic/<提交>/install.sh`。没有 curl 时 TCP 延迟测试不可用（ICMP 不受影响）。
 - 可选参数加在第二行末尾：`--iface eth0` 指定网卡（默认自动检测默认路由），`--interval 3` 初始上报间隔（秒）。
 
+### 批量更新 Agent
+
+- Agent 每次上报会带上自己的版本号（agent.sh 内容的 SHA256 前 12 位）。和面板固定的版本不一致时，首页卡片上显示“Agent 需更新”，详情页“监控”里有“Agent 版本”一栏。
+- 首页“设置”→“批量更新 Agent”给出一条所有 VPS 通用的升级命令：`sh install.sh --ref <提交> --upgrade` 会沿用每台原来的面板地址、Token、网卡和间隔，流量数据不受影响；没装过 Agent 的机器会提示改用安装命令。
+- 一次升级多台：用 Xshell、Termius、FinalShell 等的“发送到所有会话”粘贴这条命令；或者复制下方的 SSH 批量升级脚本（已预填需要更新的服务器，地址和端口按实际修改），在能 SSH 到这些 VPS 的电脑上运行。
+- 面板不会、也没法让 Agent 自动更新：升级始终需要你在 VPS 上以 root 运行命令，面板被攻破也无法借此在 VPS 上执行代码。
+
 ### VPS 连不上 GitHub
 
 服务器“设置”里的安装命令下方有“VPS 连不上 GitHub？”，展开后有两种装法，面板会按这台服务器的 Token 生成好命令：

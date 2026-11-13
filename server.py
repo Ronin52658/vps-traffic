@@ -142,7 +142,9 @@ def _load_agent_pin():
             and re.fullmatch(r"[0-9a-f]{40}", commit) and re.fullmatch(r"[0-9a-f]{64}", sha)):
         print("[warn] Agent 固定版本无效，面板不会生成安装命令（检查 agent_pin.json）")
         return None
-    return {"repo": repo, "commit": commit, "install_sha256": sha}
+    agent = (pin.get("agent_sha256") or "").lower()
+    return {"repo": repo, "commit": commit, "install_sha256": sha,
+            "agent_ver": agent[:12] if re.fullmatch(r"[0-9a-f]{64}", agent) else ""}
 
 
 AGENT_PIN = _load_agent_pin()
@@ -292,6 +294,7 @@ SERVER_COLUMNS = {
     "metrics": "TEXT NOT NULL DEFAULT ''",
     "sysinfo": "TEXT NOT NULL DEFAULT ''",
     "public_ip": "TEXT NOT NULL DEFAULT ''",
+    "agent_ver": "TEXT NOT NULL DEFAULT ''",
     "ip4": "TEXT NOT NULL DEFAULT ''",
     "ip6": "TEXT NOT NULL DEFAULT ''",
     "ip4_at": "INTEGER NOT NULL DEFAULT 0",
@@ -916,8 +919,10 @@ def handle_report(token, body, ip=""):
         gap = t - LAST_REPORT.get(srv["id"], srv["last_seen"])
         LAST_REPORT[srv["id"]] = t
         rr, rt = (rx / gap, tx / gap) if 0.5 <= gap <= 600 else (0, 0)
-        conn.execute("UPDATE servers SET last_seen=?, rate_rx=?, rate_tx=?, iface=?, hostname=?, public_ip=? WHERE id=?",
-                     (now, rr, rt, iface, host, ip[:64], srv["id"]))
+        ver = str(body.get("agent", ""))
+        ver = ver if re.fullmatch(r"[0-9a-f]{12}", ver) else ""     # 旧版 Agent 不带版本号
+        conn.execute("UPDATE servers SET last_seen=?, rate_rx=?, rate_tx=?, iface=?, hostname=?, public_ip=?, agent_ver=? WHERE id=?",
+                     (now, rr, rt, iface, host, ip[:64], ver, srv["id"]))
         if ip:
             note_ip(conn, srv, ip, now)
         sysd = parse_sys(body.get("sys"))
@@ -1161,6 +1166,10 @@ def server_summary(conn, srv, now):
         "rate_rx": srv["rate_rx"] if online else 0, "rate_tx": srv["rate_tx"] if online else 0,
         "iface": srv["iface"], "hostname": srv["hostname"],
         "ip": srv["public_ip"], "country": srv["country"] or srv["geo_country"],
+        "agent_ver": srv["agent_ver"],
+        # 上报过、且版本号和面板固定的不一致（旧版不带版本号）就提示更新
+        "agent_outdated": bool(srv["last_seen"] and AGENT_PIN and AGENT_PIN["agent_ver"]
+                               and srv["agent_ver"] != AGENT_PIN["agent_ver"]),
         "ip4": srv["ip4"] if now - srv["ip4_at"] <= IP_FRESH else "",
         "ip6": srv["ip6"] if now - srv["ip6_at"] <= IP_FRESH else "",
         "country_manual": srv["country"], "country_auto": srv["geo_country"],
@@ -1494,7 +1503,7 @@ def normalize_restored(conn):
         conn.execute("""UPDATE servers SET name=?, note=?, token=?, quota_gb=?, billing=?, reset_type=?, reset_day=?,
                           interval_days=?, anchor=?, sort=?, created_at=?, last_seen=?, rate_rx=?, rate_tx=?, iface=?,
                           hostname=?, metrics=?, sysinfo=?, public_ip=?, country=?, geo_ip=?, geo_country=?,
-                          ip4=?, ip6=?, ip4_at=?, ip6_at=? WHERE id=?""",
+                          ip4=?, ip6=?, ip4_at=?, ip6_at=?, agent_ver=? WHERE id=?""",
                      (name, txt(r["note"], 200), token, q,
                       r["billing"] if r["billing"] in VALID_BILLING else "sum",
                       r["reset_type"] if r["reset_type"] in VALID_RESET else "monthly",
@@ -1505,6 +1514,7 @@ def normalize_restored(conn):
                       _json_clean(r["metrics"], parse_sys), _json_clean(r["sysinfo"], parse_info),
                       _ip_or_empty(r["public_ip"]), cc(r["country"]), _ip_or_empty(r["geo_ip"]), cc(r["geo_country"]),
                       _ip_or_empty(r["ip4"]), _ip_or_empty(r["ip6"]), _int_in(r["ip4_at"], 0, 2 ** 40, 0), _int_in(r["ip6_at"], 0, 2 ** 40, 0),
+                      r["agent_ver"] if isinstance(r["agent_ver"], str) and re.fullmatch(r"[0-9a-f]{12}", r["agent_ver"]) else "",
                       r["id"]))
     # 离线通知：开关只能是 0/1；在线状态一律清空，等 Agent 重新上报，避免还原后误报离线/上线
     conn.execute("UPDATE servers SET notify_offline=CASE WHEN notify_offline=0 THEN 0 ELSE 1 END, alive_state=''")

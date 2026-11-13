@@ -5,14 +5,16 @@
 #   连不上 GitHub 时：
 #     --agent-file ./agent.sh   用手动传上来的 agent.sh（同样校验 SHA256，不联网下载）
 #     --mirror <前缀>           经镜像下载，例如 --mirror https://ghfast.top/（下载后同样校验 SHA256，镜像改不了内容）
+#   升级：sh install.sh --ref <提交> --upgrade   沿用这台机器原来的面板地址、Token、网卡和间隔，
+#         所有 VPS 可以用同一条命令批量升级
 #   卸载：sh install.sh --uninstall
 set -e
 
 # agent.sh 的 SHA256：agent.sh 每次修改后用 sh tools/pin_agent.sh hash 更新
 REPO="Ronin52658/vps-traffic"
-AGENT_SHA256="679680c4733df0215bc825cb98cd7fcfa367cb7759fa22852c6efa9817588618"
+AGENT_SHA256="68112376f90ceb9a519637d0781e1fb96fc619c855ecfdc7d308afd7bf99aaab"
 
-SERVER="" TOKEN="" IFACE="auto" INTERVAL=3 UNINSTALL=0 REF="" AGENT_FILE="" MIRROR=""
+SERVER="" TOKEN="" IFACE="auto" INTERVAL=3 UNINSTALL=0 REF="" AGENT_FILE="" MIRROR="" UPGRADE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --ref) REF=$2; shift 2 ;;
@@ -23,6 +25,7 @@ while [ $# -gt 0 ]; do
     --iface) IFACE=$2; shift 2 ;;
     --interval) INTERVAL=$2; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
+    --upgrade) UPGRADE=1; shift ;;
     *) echo "未知参数：$1"; exit 1 ;;
   esac
 done
@@ -38,6 +41,16 @@ if [ "$UNINSTALL" = 1 ]; then
   exit 0
 fi
 
+if [ "$UPGRADE" = 1 ]; then
+  # 从原来的配置里读（不 source，只按固定格式取值，下面照样校验格式）
+  OLD=/etc/vps-traffic/agent.conf
+  [ -f "$OLD" ] || { echo "这台还没装过 Agent，请用面板里这台服务器的安装命令"; exit 1; }
+  get() { sed -n "s/^$1=\"\(.*\)\"\$/\1/p" "$OLD" | head -1; }
+  [ -n "$SERVER" ] || SERVER=$(get SERVER); SERVER=${SERVER%/}
+  [ -n "$TOKEN" ] || TOKEN=$(get TOKEN)
+  v=$(get IFACE); [ -n "$v" ] && IFACE=$v
+  v=$(get INTERVAL); [ -n "$v" ] && INTERVAL=$v
+fi
 [ -n "$SERVER" ] && [ -n "$TOKEN" ] || { echo "需要 --server 与 --token"; exit 1; }
 # 这些值会写进配置文件，只接受安全字符
 printf '%s' "$SERVER" | grep -Eq '^https?://[]A-Za-z0-9.:[-]+(/[A-Za-z0-9._~/-]*)?$' || { echo "--server 格式不对：$SERVER"; exit 1; }

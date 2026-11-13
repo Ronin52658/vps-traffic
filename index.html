@@ -137,6 +137,7 @@ header .sub{color:var(--muted);font-size:13px;margin-top:8px}
 .lv0{background:var(--ok)} .lv1{background:var(--tx)} .lv2{background:var(--danger)}
 .chiprow{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .tag{font-size:11.5px;color:var(--muted);padding:2px 9px;border-radius:8px;box-shadow:var(--inset-sm);white-space:nowrap}
+.tag.warn{color:var(--tx);font-weight:600}
 .flag{display:inline-flex;align-items:center}
 .flag img{height:18px;width:auto;display:block;filter:drop-shadow(0 1px 1px rgba(0,0,0,.25))}
 .flag .cc{font-size:11px;font-weight:650;color:var(--muted);padding:1px 6px;border-radius:6px;box-shadow:var(--inset-sm)}
@@ -441,7 +442,8 @@ function card(s) {
   const tags = [
     s.online ? (y ? upText(y.uptime) : "在线") : (s.last_seen ? `离线 ${fd(s.last_seen, true).slice(5)}` : "尚未上报"),
     shortOs(i.os), i.cores ? `${i.cores} 核` : "",
-  ].filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join("");
+  ].filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join("")
+    + (s.agent_outdated ? `<span class="tag warn" title="这台的 Agent 不是面板当前的版本，到“设置”→“批量更新 Agent”升级">Agent 需更新</span>` : "");
   return `
     <button class="row" data-id="${s.id}">
       <div class="row-head">
@@ -629,7 +631,8 @@ function monitorInfo(s) {
     ["系统", i.os], ["内核", i.kernel],
     ["CPU", i.cpu_model ? `${i.cpu_model}（${i.cores} 核）` : ""],
     ["架构 / 虚拟化", [i.arch, i.virt && i.virt !== "none" ? i.virt : (i.virt === "none" ? "物理机" : "")].filter(Boolean).join(" / ")],
-    ...(s.ip4 || s.ip6 ? [["IPv4", s.ip4], ["IPv6", s.ip6]] : [["IP", s.ip]]), ["运行时间", y ? durText(y.uptime) : ""], ["主机名", s.hostname], ["网卡", s.iface],
+    ...(s.ip4 || s.ip6 ? [["IPv4", s.ip4], ["IPv6", s.ip6]] : [["IP", s.ip]]),
+    ["Agent 版本", s.last_seen ? `${s.agent_ver || "旧版"}${s.agent_outdated ? "（需更新）" : "（最新）"}` : ""], ["运行时间", y ? durText(y.uptime) : ""], ["主机名", s.hostname], ["网卡", s.iface],
   ];
   const nowItems = [
     ["CPU", y && y.cpu != null ? `${y.cpu.toFixed(1)}%` : ""],
@@ -921,6 +924,32 @@ function installCmd(token) {
 }
 // VPS 连不上 GitHub 时的两种装法：手动上传文件 / 经镜像下载。两种都照样校验 SHA256
 const MIRROR = "https://ghfast.top/";
+// 批量升级：所有 VPS 通用的一条命令（沿用各台原来的面板地址、Token、网卡和间隔）
+function upgradeCmd() {
+  const a = META.agent; if (!a) return "";
+  const f = "/root/vps-traffic-install.sh";
+  return [dlCmd(f, `https://raw.githubusercontent.com/${a.repo}/${a.commit}/install.sh`),
+    `echo "${a.install_sha256}  ${f}" | sha256sum -c - && sh ${f} --ref ${a.commit} --upgrade`,
+    `rm -f ${f}`].join("\n");
+}
+// 用 SSH 循环升级的脚本：主机列表预填需要更新的服务器（IP 取面板看到的地址，NAT 机、非 22 端口请自己改）
+function upgradeScript(list) {
+  // 名称里的单引号会截断脚本里的 HOSTS='…'，换成全角
+  const hosts = list.map(s => `root@${s.ip4 || s.ip || "地址"} 22   # ${s.name.replace(/[\r\n]/g, " ").replace(/'/g, "’")}`).join("\n");
+  return `#!/bin/sh
+# 每行一台：SSH 地址 端口  # 备注（NAT 机、改过 SSH 端口的请按实际修改）
+HOSTS='
+${hosts}
+'
+echo "$HOSTS" | while read -r host port _; do
+  [ -n "$host" ] || continue
+  echo "===== $host"
+  ssh -p "\${port:-22}" -o ConnectTimeout=10 "$host" 'sh -s' 2>&1 <<'UPGRADE' || echo "!!!!! $host 升级失败"
+${upgradeCmd()}
+UPGRADE
+done`;
+}
+
 function altInstallHtml(token) {
   const b = META.base_url, a = META.agent;
   if (!a) return "";
@@ -1155,6 +1184,25 @@ function drawLatency() {
   $("#lossChart").innerHTML = lossMax > 0
     ? lineChart(rows, vis.map(([t, i]) => ["p" + t.id, t.name, latColor(i)]), v => v.toFixed(0) + "%", {max: lossMax > 50 ? 100 : niceMax(lossMax * 1.1)}, rng)
     : `<p class="hint" style="padding:16px 0;text-align:center">所选时间范围内没有丢包</p>`;
+}
+
+function renderUpgrade() {
+  const box = $("#upgBox"); if (!box) return;
+  if (!META.agent) { box.innerHTML = `<p class="hint">面板没有配置 Agent 固定版本，无法生成升级命令。</p>`; return; }
+  const old = SERVERS.filter(s => s.agent_outdated);
+  box.innerHTML = `
+    <p class="hint" style="margin-bottom:10px">${old.length
+      ? `有 <b>${old.length}</b> 台的 Agent 不是当前版本：${esc(old.map(s => s.name).join("、"))}。`
+      : "所有已上报的服务器都是当前版本的 Agent。"}
+      下面这条命令所有 VPS 通用，会沿用每台原来的面板地址、Token、网卡和间隔，流量数据不受影响。</p>
+    <pre class="cmd" id="upgCmd">${esc(upgradeCmd())}</pre>
+    <div class="actions"><button class="btn" id="upgCopy">复制升级命令</button></div>
+    <p class="hint" style="margin-top:10px">一次升级多台：用 Xshell、Termius、FinalShell 等的“发送到所有会话”粘贴上面的命令；或在能 SSH 到这些 VPS 的电脑上运行下面的脚本（已预填需要更新的服务器，地址和端口按实际修改）。</p>
+    ${old.length ? `<details class="alt"><summary>SSH 批量升级脚本</summary>
+      <pre class="cmd" id="upgScript">${esc(upgradeScript(old))}</pre>
+      <div class="actions"><button class="btn" id="upgCopy2">复制脚本</button></div></details>` : ""}`;
+  $("#upgCopy").onclick = () => copyText($("#upgCmd").textContent);
+  if ($("#upgCopy2")) $("#upgCopy2").onclick = () => copyText($("#upgScript").textContent);
 }
 
 /* ---------- 分组管理（首页“设置”里进入） ---------- */
@@ -1437,6 +1485,10 @@ function openSettings() {
       <div id="orderList" class="order"></div>
     </div>
     <div class="card">
+      <h3>批量更新 Agent</h3>
+      <div id="upgBox"></div>
+    </div>
+    <div class="card">
       <h3>分组</h3>
       <p class="hint" style="margin-bottom:12px">把服务器分组后，首页顶部可以切换分组，汇总和列表只显示该分组的服务器。一台服务器可以同时属于多个分组。</p>
       <button class="btn primary" id="grpMgrBtn">管理分组</button>
@@ -1509,6 +1561,7 @@ function openSettings() {
   $("#addBtn").onclick = openAdd;
   $("#latMgrBtn").onclick = openLatency;
   $("#grpMgrBtn").onclick = openGroups;
+  renderUpgrade();
   const ntHint = () => {
     const eff = META.offline_effective || 180, set = META.offline_after || 180;
     $("#ntHint").textContent = eff > set ? `空闲上报间隔较长，实际按 ${Math.round(eff / 60 * 10) / 10} 分钟判定离线（至少是空闲间隔的两倍再加 30 秒）。` : "";

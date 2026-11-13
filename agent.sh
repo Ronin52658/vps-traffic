@@ -235,6 +235,8 @@ num_ok "$last_rx" && num_ok "$last_tx" || { last_rx="" last_tx=""; }
 num_ok "$pend_rx" && num_ok "$pend_tx" || { pend_rx=0 pend_tx=0; }
 
 HOST=$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9._-')
+# 版本号 = 本文件内容的 SHA256 前 12 位，面板据此标出需要更新的 Agent
+VER=$(sha256sum "$0" 2>/dev/null | cut -c1-12 | tr -cd '0-9a-f')
 ifc="" cpu_t="" cpu_i="" info_at=""
 prober &
 
@@ -264,7 +266,7 @@ while :; do
     fi
     lat_pick
     lat=$(lat_json)
-    body=$(printf '{"rx":%s,"tx":%s,"iface":"%s","hostname":"%s","sys":%s%s%s}' "$pend_rx" "$pend_tx" "$(clean "$ifc")" "$HOST" "$sys" "$info" "$lat")
+    body=$(printf '{"rx":%s,"tx":%s,"iface":"%s","hostname":"%s","agent":"%s","sys":%s%s%s}' "$pend_rx" "$pend_tx" "$(clean "$ifc")" "$HOST" "$VER" "$sys" "$info" "$lat")
     if resp=$(post "$body"); then
       pend_rx=0 pend_tx=0
       [ -n "$lat_files" ] && (cd "$LAT_DIR" && rm -f $lat_files)

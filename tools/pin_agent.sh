@@ -21,7 +21,7 @@ case "$1" in
     got=$(git show "$c:agent.sh" | sha256sum | awk '{print $1}')
     [ "$want" = "$got" ] || { echo "提交 $c 里 install.sh 记录的 agent.sh 哈希不一致，先运行 hash 再提交"; exit 1; }
     ih=$(git show "$c:install.sh" | sha256sum | awk '{print $1}')
-    printf '{\n  "repo": "%s",\n  "commit": "%s",\n  "install_sha256": "%s"\n}\n' "$REPO" "$c" "$ih" > agent_pin.json
+    printf '{\n  "repo": "%s",\n  "commit": "%s",\n  "install_sha256": "%s",\n  "agent_sha256": "%s"\n}\n' "$REPO" "$c" "$ih" "$got" > agent_pin.json
     cat agent_pin.json
     echo "确认 $c 已推送到 GitHub，然后提交 agent_pin.json 并升级面板（sh install_panel.sh）"
     ;;
