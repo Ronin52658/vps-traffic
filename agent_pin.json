@@ -1,5 +1,6 @@
 {
   "repo": "Ronin52658/vps-traffic",
-  "commit": "74873b97a24f865d47de3f916174941acec6baed",
-  "install_sha256": "6cddcf643c7688749acb2a08290c37388aa1619edc421cfe513feaced876cb6a"
+  "commit": "f7d37339fd63cb13368423774d812359695c4823",
+  "install_sha256": "5c98af248c0ae242efb97f4859dd9fc464353fd739ce2ca0c705c0cae7efe5e2",
+  "agent_sha256": "68112376f90ceb9a519637d0781e1fb96fc619c855ecfdc7d308afd7bf99aaab"
 }
